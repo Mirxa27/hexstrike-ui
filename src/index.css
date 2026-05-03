@@ -1,0 +1,101 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: #0a0a0f;
+  color: #e2e8f0;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  overflow-x: hidden;
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0f0f1a;
+}
+::-webkit-scrollbar-thumb {
+  background: #1a1a2e;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #e63946;
+}
+
+/* Chat message prose overrides */
+.prose-hex p { margin: 0.25rem 0; }
+.prose-hex code {
+  background: #1a1a2e;
+  color: #00ff41;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+.prose-hex pre {
+  background: #0f0f1a;
+  border: 1px solid #1a1a2e;
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+}
+.prose-hex pre code {
+  background: none;
+  padding: 0;
+  color: #e2e8f0;
+}
+.prose-hex a { color: #00d4ff; }
+.prose-hex strong { color: #fbbf24; }
+.prose-hex h1, .prose-hex h2, .prose-hex h3 { color: #e63946; }
+.prose-hex ul, .prose-hex ol { padding-left: 1.5rem; }
+.prose-hex li { margin: 0.1rem 0; }
+
+/* Scanline effect */
+.scanlines::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 255, 65, 0.015) 2px,
+    rgba(0, 255, 65, 0.015) 4px
+  );
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Tool call card pulse */
+@keyframes toolPulse {
+  0%, 100% { border-color: #1a1a2e; }
+  50% { border-color: #e63946; }
+}
+.tool-running {
+  animation: toolPulse 1.5s ease-in-out infinite;
+}
+
+/* Typing indicator */
+@keyframes typingDot {
+  0%, 100% { opacity: 0.2; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-4px); }
+}
+.typing-dot:nth-child(1) { animation: typingDot 1.2s 0s infinite; }
+.typing-dot:nth-child(2) { animation: typingDot 1.2s 0.2s infinite; }
+.typing-dot:nth-child(3) { animation: typingDot 1.2s 0.4s infinite; }

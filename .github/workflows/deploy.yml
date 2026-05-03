@@ -1,0 +1,50 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+      version:
+        description: 'Docker image tag to deploy'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to server
+        id: deploy
+        run: |
+          # Add your deployment commands here
+          # Example:
+          # ssh user@server "cd /app && docker-compose pull && docker-compose up -d"
+
+          echo "Deploying version ${{ inputs.version }} to ${{ inputs.environment }}"
+          echo "url=http://your-server.com" >> $GITHUB_OUTPUT
+
+      - name: Verify deployment
+        run: |
+          # Add health checks here
+          echo "Verifying deployment..."
+          sleep 10
+          curl -f ${{ steps.deploy.outputs.url }} || exit 1
+
+      - name: Notify deployment
+        if: success()
+        run: echo "Deployment successful!"
