@@ -90,19 +90,25 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
       // Inter-step variable piping (P3-3): the recommendation may use
       // `${prev.<tool>.<field>}` references in its target/options string,
       // resolved against entities extracted from earlier executions.
+      // Use the per-step target from the plan (which is where the LLM
+      // places the placeholders); fall back to the top-level target.
       const ctx = {
         prev: entitiesByTool(completedExecutions),
         entities: { domains: [], subdomains: [], ips: [], urls: [], emails: [], cves: [], hashes: [], ports: [] },
       }
-      const targetRes = substituteVariables(target, ctx)
+      const stepTarget = recommendation.target ?? target
+      const targetRes = substituteVariables(stepTarget, ctx)
       const resolvedTarget = targetRes.value || target
+      const optsRaw = recommendation.options
+        ? substituteVariables(recommendation.options, ctx).value
+        : ''
 
       try {
         const result = await executeHexstrikeTool(
           settings.hexstrikeUrl || 'http://localhost:8888',
           recommendation.tool.name,
           resolvedTarget,
-          { raw: '' }
+          { raw: optsRaw }
         )
 
         const execution: ToolExecution = {
@@ -154,6 +160,10 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
 
   const startAutonomousScan = () => {
     if (!target || !scanPlan) return
+    // A new scan is a clean slate — clear any failure history from
+    // previous runs so a tool that failed for `acme.com` isn't skipped
+    // when the user moves on to `example.com`.
+    failureTrackerRef.current = new FailureTracker()
     setIsRunning(true)
     setIsPaused(false)
     setCurrentStep(0)
@@ -171,6 +181,7 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
   }
 
   const resetScan = () => {
+    failureTrackerRef.current = new FailureTracker()
     setIsRunning(false)
     setIsPaused(false)
     setCurrentStep(0)

@@ -7,6 +7,10 @@ export interface AIRecommendation {
   priority: 'critical' | 'high' | 'medium' | 'low'
   estimatedTime: string
   dependsOn?: string[]
+  /** Per-step target (may include `${prev...}` piping). Defaults to plan target. */
+  target?: string
+  /** Optional `--key value` flag string to forward to the backend. */
+  options?: string
 }
 
 export interface AIScanPlan {
@@ -317,6 +321,11 @@ export async function generateScanPlanSmart(
           priority: i < 3 ? 'high' : i < 6 ? 'medium' : 'low',
           estimatedTime: '2-5 min',
           dependsOn,
+          // Preserve the per-step target (may contain `${prev...}` piping)
+          // and options string so the autonomous executor can run the DAG
+          // the model actually planned, not just the tool ordering.
+          target: s.target,
+          options: s.options,
         } as AIRecommendation
       })
       .filter((r): r is AIRecommendation => r !== null)

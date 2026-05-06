@@ -50,11 +50,23 @@ const FORBIDDEN_TARGET_CHARS = /[\x00-\x1f\x7f`$;|&<>"'\\]/
 // is rejected outright.
 const OPTION_TOKEN_RE = /^[A-Za-z0-9_./:=,@+\-]+$/
 
-function isPrivateIPv4(ip: string): boolean {
+function isValidIPv4(ip: string): boolean {
   const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
   if (!m) return false
+  for (let i = 1; i <= 4; i++) {
+    const o = m[i]
+    // Reject leading zeros (e.g. "01.02.03.04") and out-of-range octets.
+    if (o.length > 1 && o.startsWith('0')) return false
+    const n = +o
+    if (n < 0 || n > 255) return false
+  }
+  return true
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  if (!isValidIPv4(ip)) return false
+  const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)!
   const a = +m[1], b = +m[2]
-  if ([a, b, +m[3], +m[4]].some((x) => x < 0 || x > 255)) return false
   if (a === 0) return true   // unspecified
   if (a === 10 || a === 127) return true
   if (a === 169 && b === 254) return true
@@ -150,16 +162,25 @@ export function validateTarget(
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
         return { ok: false, value: '', warnings, error: 'Only http(s) URLs are allowed' }
       }
-      if (parsed.hostname && (isPrivateIPv4(parsed.hostname) || isPrivateIPv6(parsed.hostname))) {
-        if (opts.blockPrivate) {
-          return { ok: false, value: '', warnings, error: 'URL points to a private/loopback address' }
+      if (parsed.hostname) {
+        // Reject URLs whose host is a structurally-invalid IPv4 (e.g. 999.x.x.x).
+        if (IPV4_RE.test(parsed.hostname) && !isValidIPv4(parsed.hostname)) {
+          return { ok: false, value: '', warnings, error: 'URL host is an invalid IPv4 address' }
         }
-        warnings.push('URL points to a private/loopback address — proceed with caution.')
+        if (isPrivateIPv4(parsed.hostname) || isPrivateIPv6(parsed.hostname)) {
+          if (opts.blockPrivate) {
+            return { ok: false, value: '', warnings, error: 'URL points to a private/loopback address' }
+          }
+          warnings.push('URL points to a private/loopback address — proceed with caution.')
+        }
       }
       break
     }
     case 'ip':
       if (IPV4_RE.test(cleaned)) {
+        if (!isValidIPv4(cleaned)) {
+          return { ok: false, value: '', warnings, error: 'Invalid IPv4 address (octet out of range)' }
+        }
         if (isPrivateIPv4(cleaned)) {
           if (opts.blockPrivate) {
             return { ok: false, value: '', warnings, error: 'Refusing to scan private/loopback IP' }
@@ -177,11 +198,29 @@ export function validateTarget(
         return { ok: false, value: '', warnings, error: 'Invalid IP address' }
       }
       break
-    case 'cidr':
-      if (!CIDR_RE.test(cleaned)) {
+    case 'cidr': {
+      const m = cleaned.match(/^([^/]+)\/(\d{1,3})$/)
+      if (!m) {
         return { ok: false, value: '', warnings, error: 'Invalid CIDR notation' }
       }
+      const addr = m[1]
+      const prefix = +m[2]
+      if (IPV4_RE.test(addr)) {
+        if (!isValidIPv4(addr)) {
+          return { ok: false, value: '', warnings, error: 'Invalid CIDR (IPv4 octet out of range)' }
+        }
+        if (prefix < 0 || prefix > 32) {
+          return { ok: false, value: '', warnings, error: 'Invalid CIDR prefix (IPv4 must be 0–32)' }
+        }
+      } else if (IPV6_RE.test(addr) && addr.includes(':')) {
+        if (prefix < 0 || prefix > 128) {
+          return { ok: false, value: '', warnings, error: 'Invalid CIDR prefix (IPv6 must be 0–128)' }
+        }
+      } else {
+        return { ok: false, value: '', warnings, error: 'Invalid CIDR address' }
+      }
       break
+    }
     case 'domain':
       if (!DOMAIN_RE.test(cleaned)) {
         return { ok: false, value: '', warnings, error: 'Invalid domain name' }
@@ -247,7 +286,22 @@ export async function fetchModels(settings: AISettings): Promise<string[]> {
   const { provider, apiKey, baseUrl } = settings
 
   switch (provider) {
-    case Provider.anthropic:
+    case Provider.anthropic: {
+      // Real authenticated round-trip so SettingsPage's "Verify API key"
+      // can't false-positive when the key is missing/invalid.
+      if (!apiKey) throw new Error('Anthropic API key is required')
+      const res = await fetch('https://api.anthropic.com/v1/models', {
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+      })
+      if (!res.ok) throw new Error(`Anthropic error: ${res.status} ${res.statusText}`)
+      const data = await res.json()
+      const list = (data.data ?? data.models ?? []).map((m: any) => m.id ?? m.name).filter(Boolean)
+      if (list.length) return list
+      // Fall back to a curated list if the endpoint shape changes.
       return [
         'claude-opus-4-7',
         'claude-sonnet-4-6',
@@ -256,14 +310,21 @@ export async function fetchModels(settings: AISettings): Promise<string[]> {
         'claude-3-5-haiku-20241022',
         'claude-3-opus-20240229',
       ]
+    }
 
-    case Provider.google:
-      return [
-        'gemini-2.0-flash',
-        'gemini-2.0-pro',
-        'gemini-1.5-flash',
-        'gemini-1.5-pro',
-      ]
+    case Provider.google: {
+      if (!apiKey) throw new Error('Google API key is required')
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`
+      )
+      if (!res.ok) throw new Error(`Google error: ${res.status} ${res.statusText}`)
+      const data = await res.json()
+      const list = (data.models ?? [])
+        .map((m: any) => (m.name ?? '').replace(/^models\//, ''))
+        .filter(Boolean)
+      if (list.length) return list
+      return ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+    }
 
     case Provider.ollama: {
       const base = baseUrl || DEFAULT_BASE_URLS[Provider.ollama]
@@ -307,10 +368,21 @@ export async function fetchModels(settings: AISettings): Promise<string[]> {
   }
 }
 
+/**
+ * Normalize a configured HexStrike URL to a bare origin (no trailing
+ * `/api`). Both styles are accepted in settings — `http://host:8888` or
+ * `http://host:8888/api`, plus the in-container `/api` shorthand — and we
+ * always re-append `/api/...` ourselves so callers can't end up with
+ * `/api/api/tools` regressions.
+ */
+function normalizeHexstrikeBase(url: string): string {
+  return url.replace(/\/+$/, '').replace(/\/api$/, '')
+}
+
 export async function fetchHexstrikeTools(
   hexstrikeUrl: string
 ): Promise<{ tools: HexstrikeTool[]; categories: HexstrikeCategory[] }> {
-  const base = hexstrikeUrl.replace(/\/+$/, '')
+  const base = normalizeHexstrikeBase(hexstrikeUrl)
   const res = await fetch(`${base}/api/tools`)
   if (!res.ok) throw new Error(`HexStrike API error: ${res.status} ${res.statusText}`)
   const data = await res.json()
@@ -362,7 +434,7 @@ export async function executeHexstrikeTool(
   target: string,
   params?: Record<string, any>
 ): Promise<any> {
-  const base = hexstrikeUrl.replace(/\/+$/, '')
+  const base = normalizeHexstrikeBase(hexstrikeUrl)
 
   if (!tool || typeof tool !== 'string' || !/^[A-Za-z0-9_-]+$/.test(tool)) {
     throw new ToolValidationError(`Invalid tool name: ${tool}`)

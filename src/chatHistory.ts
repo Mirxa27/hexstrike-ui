@@ -28,6 +28,33 @@ function generateTitle(messages: Message[]): string {
   return content.slice(0, 50) + (content.length > 50 ? '...' : '')
 }
 
+/**
+ * Drop heavyweight payloads (notably base64 file bytes attached via
+ * `file_attach` tool calls) from a message list before it's persisted to
+ * localStorage. The bytes only need to live for the duration of the
+ * in-memory conversation; persisting them would saturate the browser's
+ * ~5 MB per-origin quota after a single near-limit upload.
+ */
+function sanitizeMessagesForStorage(messages: Message[]): Message[] {
+  return messages.map((m) => {
+    if (!m.toolCalls?.length) return m
+    return {
+      ...m,
+      toolCalls: m.toolCalls.map((tc: any) => {
+        if (tc?.name !== 'file_attach' || !tc.arguments?.files) return tc
+        const files = (tc.arguments.files as any[]).map((f) => ({
+          id: f.id,
+          name: f.name,
+          category: f.category,
+          // intentionally drop `data` — the base64 blob is too big for
+          // localStorage and isn't useful after the message is sent.
+        }))
+        return { ...tc, arguments: { ...tc.arguments, files } }
+      }),
+    }
+  })
+}
+
 export function createChatHistoryStore(): ChatHistoryStore {
   let sessions: ChatSession[] = []
   let currentSessionId: string | null = null
@@ -97,7 +124,11 @@ export function createChatHistoryStore(): ChatHistoryStore {
   const updateSession = (id: string, messages: Message[], title?: string) => {
     const idx = sessions.findIndex((s) => s.id === id)
     if (idx >= 0) {
-      sessions[idx].messages = messages
+      // Strip large in-memory blobs (e.g. base64 file payloads from
+      // file_attach tool calls) before persisting to localStorage —
+      // keeping them would blow the ~5 MB browser quota and silently
+      // break save/export/import.
+      sessions[idx].messages = sanitizeMessagesForStorage(messages)
       sessions[idx].updatedAt = Date.now()
       if (title) sessions[idx].title = title
       else if (sessions[idx].title === 'New Chat' || sessions[idx].title.startsWith('New Chat')) {

@@ -144,7 +144,7 @@ const WORKSPACE_CONFIGS: Record<
 
 export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
   const config = WORKSPACE_CONFIGS[workspaceType]
-  const { addWorkspaceExecution, addRecentTool, workspaceExecutions, setWorkspaceExecutions, hexstrikeLoading, hexstrikeConnected } = useApp()
+  const { addWorkspaceExecution, addRecentTool, workspaceExecutions, setWorkspaceExecutions, hexstrikeLoading, hexstrikeConnected, settings } = useApp()
 
   const [forms, setForms] = useState<ToolForm[]>([
     { toolName: config.commonTools[0] || '', target: '', options: '', advancedOptions: {} },
@@ -198,7 +198,7 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
     try {
       const params = form.options ? { raw: form.options } : undefined
       const result = await executeHexstrikeTool(
-        'http://localhost:8888',
+        settings.hexstrikeUrl || 'http://localhost:8888',
         form.toolName,
         form.target,
         params

@@ -18,6 +18,21 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Detect compose CLI: prefer the integrated `docker compose` plugin,
+REM fall back to standalone `docker-compose.exe` for older installs.
+docker compose version >nul 2>&1
+if errorlevel 1 (
+    docker-compose --version >nul 2>&1
+    if errorlevel 1 (
+        echo Error: Docker Compose is not installed.
+        echo Visit: https://docs.docker.com/compose/install/
+        exit /b 1
+    )
+    set DOCKER_COMPOSE=docker-compose
+) else (
+    set DOCKER_COMPOSE=docker compose
+)
+
 REM Bootstrap .env on first run
 if not exist .env (
     if exist .env.example (
@@ -72,7 +87,7 @@ exit /b 1
 
 :start
 echo Starting HexStrike UI...
-docker compose %PROFILE_ARGS% up -d
+%DOCKER_COMPOSE% %PROFILE_ARGS% up -d
 echo.
 echo HexStrike UI is now running!
 echo Open your browser and visit: http://localhost:4173
@@ -86,45 +101,45 @@ goto :end
 
 :stop
 echo Stopping HexStrike UI...
-docker compose %PROFILE_ARGS% stop
+%DOCKER_COMPOSE% %PROFILE_ARGS% stop
 echo Stopped!
 goto :end
 
 :restart
 echo Restarting HexStrike UI...
-docker compose %PROFILE_ARGS% restart
+%DOCKER_COMPOSE% %PROFILE_ARGS% restart
 echo Restarted!
 echo Visit: http://localhost:4173
 goto :end
 
 :down
 echo Stopping and removing containers...
-docker compose --profile backend down
+%DOCKER_COMPOSE% --profile backend down
 echo Containers removed!
 goto :end
 
 :logs
 echo Following logs (Ctrl+C to exit)...
-docker compose %PROFILE_ARGS% logs -f
+%DOCKER_COMPOSE% %PROFILE_ARGS% logs -f
 goto :end
 
 :build
 echo Building Docker images...
-docker compose %PROFILE_ARGS% build
+%DOCKER_COMPOSE% %PROFILE_ARGS% build
 echo Build complete!
 echo Run 'start.bat up' to start the application
 goto :end
 
 :rebuild
 echo Rebuilding Docker images from scratch...
-docker compose %PROFILE_ARGS% build --no-cache
+%DOCKER_COMPOSE% %PROFILE_ARGS% build --no-cache
 echo Rebuild complete!
 echo Run 'start.bat up' to start the application
 goto :end
 
 :clean
 echo Cleaning up...
-docker compose --profile backend down -v
+%DOCKER_COMPOSE% --profile backend down -v
 docker system prune -f
 echo Cleanup complete!
 goto :end

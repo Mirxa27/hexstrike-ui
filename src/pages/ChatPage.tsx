@@ -460,17 +460,18 @@ export function ChatPage() {
     }
   }, [settings, activeTools, autoComplete, addSessionUsage])
 
-  const handleSubmit = useCallback(async () => {
-    const content = input.trim()
-    if ((!content && attachments.length === 0) || isStreaming) return
+  const handleSubmit = useCallback(async (override?: { content?: string; attachments?: UploadedFile[] }) => {
+    const content = (override?.content ?? input).trim()
+    const sendAttachments = override?.attachments ?? attachments
+    if ((!content && sendAttachments.length === 0) || isStreaming) return
 
     setInput('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
     // Build message content with file info
     let messageContent = content
-    if (attachments.length > 0) {
-      const fileInfo = attachments.map((f) => `- ${f.name} (${f.category}, ${(f.size / 1024).toFixed(1)} KB)`).join('\n')
+    if (sendAttachments.length > 0) {
+      const fileInfo = sendAttachments.map((f) => `- ${f.name} (${f.category}, ${(f.size / 1024).toFixed(1)} KB)`).join('\n')
       messageContent = content ? `${content}\n\n**Attached files:**\n${fileInfo}` : `**Attached files for analysis:**\n${fileInfo}`
     }
 
@@ -479,12 +480,12 @@ export function ChatPage() {
       role: 'user',
       content: messageContent,
       timestamp: Date.now(),
-      toolCalls: attachments.length > 0 ? [{
+      toolCalls: sendAttachments.length > 0 ? [{
         id: `file-attach-${Date.now()}`,
         name: 'file_attach',
-        arguments: { files: attachments.map((f) => ({ id: f.id, name: f.name, category: f.category, data: f.data })) },
+        arguments: { files: sendAttachments.map((f) => ({ id: f.id, name: f.name, category: f.category, data: f.data })) },
         status: 'done',
-        result: `Attached ${attachments.length} file(s) for analysis`,
+        result: `Attached ${sendAttachments.length} file(s) for analysis`,
       }] : undefined,
     }
 
@@ -621,13 +622,29 @@ export function ChatPage() {
     const userMsgPos = messages.length - 1 - idx
     const userMsg = messages[userMsgPos]
     if (!userMsg) return
+
+    // Recover any attachments the original turn carried so the retry
+    // includes the same files (the assistant just failed to process them).
+    const attachToolCall = (userMsg.toolCalls || []).find((tc: any) => tc?.name === 'file_attach') as any
+    const restoredAttachments: UploadedFile[] = ((attachToolCall?.arguments?.files as any[]) || [])
+      .filter((f: any) => f && typeof f.data === 'string') // can't replay if data was already stripped for storage
+      .map((f: any) => ({
+        id: f.id,
+        name: f.name,
+        size: 0,
+        type: 'unknown',
+        category: f.category,
+        data: f.data,
+      } as UploadedFile))
+
     // Keep only messages up to (but not including) the failed assistant turn.
     setMessages(messages.slice(0, userMsgPos))
-    setInput(typeof userMsg.content === 'string' ? userMsg.content : '')
-    // Defer submit so state settles.
-    setTimeout(() => { void handleSubmit() }, 0)
+    const restoredContent = typeof userMsg.content === 'string' ? userMsg.content : ''
+    // Pass content + attachments explicitly so we don't depend on the
+    // post-setState input/attachments state (which is async).
+    void handleSubmit({ content: restoredContent, attachments: restoredAttachments })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages])
+  }, [messages, handleSubmit])
 
   return (
     <div className="flex flex-col h-full">
@@ -792,7 +809,7 @@ export function ChatPage() {
               disabled={isStreaming}
             />
             <button
-              onClick={handleSubmit}
+              onClick={() => handleSubmit()}
               disabled={(!input.trim() && attachments.length === 0) || isStreaming}
               className="shrink-0 h-12 w-12 flex items-center justify-center rounded-lg bg-[#e63946] hover:bg-[#c1121f] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               title={isStreaming ? 'Processing...' : attachments.length > 0 && !input.trim() ? 'Send files' : 'Send message'}

@@ -242,6 +242,21 @@ async function* openAIStream(
     body.max_tokens = settings.maxTokens
     body.max_completion_tokens = settings.maxTokens
 
+    // Ask OpenAI-compatible providers (openai, groq, mistral) to emit
+    // a final usage chunk in the SSE stream — without this, the stream
+    // ends without the {prompt_tokens, completion_tokens} payload that
+    // the topbar token meter relies on. Local providers (lmstudio,
+    // ollama) don't honour this option but accepting the extra field
+    // is harmless on their side.
+    if (
+      settings.provider === Provider.openai ||
+      settings.provider === Provider.groq ||
+      settings.provider === Provider.mistral ||
+      settings.provider === Provider.custom
+    ) {
+      body.stream_options = { include_usage: true }
+    }
+
     // Reasoning models (o1/o3) — surface effort knob (P3-8).
     const effort = suggestReasoningEffort(settings)
     if (effort) body.reasoning_effort = effort

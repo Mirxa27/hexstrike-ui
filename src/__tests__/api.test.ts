@@ -44,6 +44,32 @@ describe('validateTarget', () => {
     const r = validateTarget('https://example.com/path', 'url')
     expect(r.ok).toBe(true)
   })
+
+  it('rejects out-of-range IPv4 octets', () => {
+    expect(validateTarget('999.1.1.1', 'ip').ok).toBe(false)
+    expect(validateTarget('1.2.3.256', 'ip').ok).toBe(false)
+  })
+
+  it('rejects IPv4 with leading-zero octets', () => {
+    expect(validateTarget('01.02.03.04', 'ip').ok).toBe(false)
+  })
+
+  it('rejects malformed CIDR (out-of-range octet)', () => {
+    expect(validateTarget('300.1.1.1/24', 'cidr').ok).toBe(false)
+  })
+
+  it('rejects out-of-range CIDR prefix', () => {
+    expect(validateTarget('10.0.0.0/33', 'cidr').ok).toBe(false)
+    expect(validateTarget('::/999', 'cidr').ok).toBe(false)
+  })
+
+  it('accepts a valid IPv4 CIDR', () => {
+    expect(validateTarget('10.0.0.0/24', 'cidr').ok).toBe(true)
+  })
+
+  it('rejects URLs whose host is a structurally-invalid IPv4', () => {
+    expect(validateTarget('http://999.999.999.999/', 'url').ok).toBe(false)
+  })
 })
 
 describe('sanitizeOptions', () => {

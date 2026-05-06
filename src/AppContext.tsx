@@ -79,7 +79,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceType>('chat')
   const [workspaceExecutions, setWorkspaceExecutions] = useState<ToolExecution[]>([])
   const [recentTools, setRecentTools] = useState<string[]>([])
-  // Per-session token usage (P3-9). Reset whenever the user starts a new chat.
+  // Per-session token usage (P3-9). Reset whenever the user starts a new
+  // chat or switches conversations so the topbar meter reflects the
+  // *current* chat, not lifetime totals.
   const [sessionUsage, setSessionUsage] = useState<{ in: number; out: number }>({ in: 0, out: 0 })
   const addSessionUsage = useCallback((delta: { in?: number; out?: number }) => {
     setSessionUsage((prev) => ({
@@ -88,6 +90,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }))
   }, [])
   const resetSessionUsage = useCallback(() => setSessionUsage({ in: 0, out: 0 }), [])
+
+  // Auto-reset usage when the active chat changes (incl. new chat = null).
+  useEffect(() => {
+    setSessionUsage({ in: 0, out: 0 })
+  }, [currentChatId])
 
   // Track previous connection state so we only toast on state transitions.
   const wasConnectedRef = useRef<boolean | null>(null)
