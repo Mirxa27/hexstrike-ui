@@ -1,0 +1,6 @@
+[submodule "hexstrike-ai"]
+	path = hexstrike-ai
+	url = https://github.com/0x4m4/hexstrike-ai.git
+[submodule "Awesome-Hacking"]
+	path = Awesome-Hacking
+	url = https://github.com/Hack-with-Github/Awesome-Hacking.git
