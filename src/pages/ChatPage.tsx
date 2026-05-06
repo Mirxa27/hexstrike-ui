@@ -360,7 +360,12 @@ export function ChatPage() {
     const updatedMessages = [...currentMessages, assistantMsg]
     setMessages(updatedMessages)
 
-    const aborted = false
+    let aborted = signal?.aborted ?? false
+    if (signal && !aborted) {
+      signal.addEventListener('abort', () => {
+        aborted = true
+      }, { once: true })
+    }
     let lastContent = ''
     const toolCallMap: Record<string, ToolCall> = {}
 
