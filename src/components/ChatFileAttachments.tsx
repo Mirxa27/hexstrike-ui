@@ -37,11 +37,15 @@ const FILE_ICONS: Record<string, any> = {
   unknown: FileText,
 }
 
-// Hard cap: per-file size and total accumulated size. Anything larger
-// is rejected to avoid OOMing the browser when base64-encoding into
-// localStorage / chat history.
-const MAX_FILE_BYTES = 25 * 1024 * 1024 // 25 MB per file
-const MAX_TOTAL_BYTES = 100 * 1024 * 1024 // 100 MB total
+// Hard cap: per-file size and total accumulated size. The reviewer
+// reminded us that base64-encoding inflates payloads by ~33%, so a 25 MB
+// file becomes ~33 MB in memory and (if persisted) in localStorage.
+// Browser localStorage quota is typically 5–10 MB per origin — we DO NOT
+// persist file bytes there (they live in component state only and are
+// dropped after the message is sent). The caps below are tuned for
+// in-memory base64 handling, not for storage.
+const MAX_FILE_BYTES = 15 * 1024 * 1024 // 15 MB raw per file (~20 MB base64)
+const MAX_TOTAL_BYTES = 60 * 1024 * 1024 // 60 MB raw total (~80 MB base64)
 
 export function ChatFileAttachments({ attachments, onAdd, onRemove, disabled }: ChatFileAttachmentsProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)

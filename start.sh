@@ -66,7 +66,7 @@ case $COMMAND in
     up|start)
         echo "🚀 Starting HexStrike UI..."
         if [ "$WITH_BACKEND" = "1" ]; then
-            echo "   ↳ Including optional HexStrike backend (image: \${HEXSTRIKE_BACKEND_IMAGE:-hexstrike-backend:latest})"
+            echo "   ↳ Including optional HexStrike backend (image: ${HEXSTRIKE_BACKEND_IMAGE:-hexstrike-backend:latest})"
         fi
         $DOCKER_COMPOSE "${PROFILE_ARGS[@]}" up -d
         echo ""
