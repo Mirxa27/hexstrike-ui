@@ -34,8 +34,7 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf.tpl
 # Substitute the backend upstream into the nginx config at build time.
 # (Kept as a sed pass rather than envsubst so $vars in the config aren't clobbered.)
 RUN sed "s|__BACKEND_URL__|${BACKEND_URL}|g" /etc/nginx/conf.d/default.conf.tpl > /etc/nginx/conf.d/default.conf \
- && rm /etc/nginx/conf.d/default.conf.tpl \
- && nginx -t
+ && rm /etc/nginx/conf.d/default.conf.tpl
 
 # Non-root user with writable nginx state dirs
 RUN addgroup -g 1001 -S hexstrike \

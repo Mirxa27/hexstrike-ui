@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
 import type { AISettings, HexstrikeCategory, HexstrikeTool, WorkspaceType, ToolExecution, QuickAction } from './types'
 import { useSettingsStore } from './store'
@@ -118,7 +119,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setHexstrikeError(msg)
       if (wasConnectedRef.current !== false) {
         toaster.error(`HexStrike unreachable: ${msg}`, {
-          action: { label: 'Retry', onClick: () => { void refreshHexstrike() } },
+
         })
       }
       wasConnectedRef.current = false

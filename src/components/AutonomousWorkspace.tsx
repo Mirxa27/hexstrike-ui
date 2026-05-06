@@ -144,8 +144,18 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
     }
 
     executeNext()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isRunning, isPaused, currentStep, scanPlan, target])
+
+  }, [
+    isRunning,
+    isPaused,
+    currentStep,
+    scanPlan,
+    target,
+    settings,
+    completedExecutions,
+    addWorkspaceExecution,
+    addRecentTool,
+  ])
 
   // Generate analysis when execution completes
   useEffect(() => {
