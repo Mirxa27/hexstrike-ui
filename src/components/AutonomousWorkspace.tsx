@@ -145,7 +145,17 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
 
     executeNext()
 
-  }, [isRunning, isPaused, currentStep, scanPlan, target])
+  }, [
+    isRunning,
+    isPaused,
+    currentStep,
+    scanPlan,
+    target,
+    settings,
+    completedExecutions,
+    addWorkspaceExecution,
+    addRecentTool,
+  ])
 
   // Generate analysis when execution completes
   useEffect(() => {
