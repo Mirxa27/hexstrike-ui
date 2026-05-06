@@ -25,21 +25,37 @@ An elite cybersecurity AI assistant with autonomous agent capabilities, access t
 # Make the script executable (first time only)
 chmod +x start.sh
 
-# Start the application
+# Start the frontend (single command, no backend image required)
 ./start.sh up
+
+# Or start frontend + the optional HexStrike backend together:
+./start.sh up --with-backend
 ```
 
 **Windows:**
 ```cmd
 start.bat up
+start.bat up --with-backend
 ```
 
 Then open your browser and visit: **http://localhost:4173**
 
-### Option 2: Docker Compose
+> ⚠️ The HexStrike backend container is **optional** and lives in a separate
+> repository — it's gated behind a Compose `backend` profile so the default
+> `up` works on a fresh clone with no extra setup. If you don't start the
+> backend you can still talk to LLM providers and configure tools, but
+> tool execution will fail until you point Settings → HexStrike URL at a
+> reachable backend (defaults to `http://hexstrike-backend:8888` inside the
+> compose network and is proxied at `/api/` by nginx).
+
+### Option 2: Docker Compose directly
 
 ```bash
-docker-compose up -d
+# Frontend only
+docker compose up -d
+
+# Frontend + backend
+docker compose --profile backend up -d
 ```
 
 ### Option 3: Manual Docker Build
@@ -58,15 +74,35 @@ docker run -p 4173:8080 hexstrike-ui
 # Install dependencies
 npm install
 
-# Start development server
+# Start development server (or `./start.sh dev` for the same thing)
 npm run dev
 
-# Build for production
+# Type-check, test, build, lint
+npm run typecheck
+npm test
 npm run build
-
-# Preview production build
-npm run preview
+npm run lint
 ```
+
+## 🛠 Troubleshooting
+
+**Frontend loads but tools fail with "Backend unreachable"**
+The HexStrike backend isn't running. Either start it via
+`./start.sh up --with-backend` or point Settings → HexStrike URL at an
+existing backend (and ensure it allows your origin via CORS).
+
+**`docker compose up` fails with `ImageNotFound: hexstrike-backend`**
+You're invoking the backend profile without a built image. Either remove
+`--profile backend` / `--with-backend`, or build the backend image
+yourself in its own repository first.
+
+**API key prompt keeps resetting**
+Keys are stored in your browser's `localStorage`. Clearing site data
+or using a different profile/incognito window will lose them.
+
+**Build fails with "module not found"**
+Run `npm ci` (not `npm install`) to install the exact versions from
+`package-lock.json`.
 
 ## 📋 Management Commands
 

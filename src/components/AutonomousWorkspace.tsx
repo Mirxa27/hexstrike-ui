@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   Play,
   Pause,
@@ -21,7 +21,8 @@ import {
 import type { ToolExecution, HexstrikeTool, OSINTReport } from '../types'
 import { useApp } from '../AppContext'
 import { executeHexstrikeTool } from '../api'
-import { generateScanPlan, detectTargetType, analyzeResults, type AIScanPlan } from '../aiAgent'
+import { generateScanPlanSmart, detectTargetType, analyzeResults, type AIScanPlan } from '../aiAgent'
+import { entitiesByTool, substituteVariables, FailureTracker } from '../agent'
 import { generateOSINTReport, generateNarrativeReport } from '../reportGenerator'
 
 interface AutonomousWorkspaceProps {
@@ -30,7 +31,7 @@ interface AutonomousWorkspaceProps {
 }
 
 export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspaceProps) {
-  const { addWorkspaceExecution, addRecentTool } = useApp()
+  const { addWorkspaceExecution, addRecentTool, hexstrikeLoading, hexstrikeConnected, settings } = useApp()
 
   const [target, setTarget] = useState('')
   const [isRunning, setIsRunning] = useState(false)
@@ -43,15 +44,21 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
   const [analysis, setAnalysis] = useState<any>(null)
   const [showNarrative, setShowNarrative] = useState(false)
 
-  // Generate scan plan when target changes
+  // Persistent failure tracker across the scan run (P3-10).
+  const failureTrackerRef = useRef(new FailureTracker())
+
+  // Generate scan plan when target changes (LLM-backed when possible, P3-1)
   useEffect(() => {
     if (target.length > 3) {
-      const plan = generateScanPlan(target, tools)
-      setScanPlan(plan)
+      let cancelled = false
+      void generateScanPlanSmart(target, tools, settings).then(({ plan }) => {
+        if (!cancelled) setScanPlan(plan)
+      })
+      return () => { cancelled = true }
     } else {
       setScanPlan(null)
     }
-  }, [target, tools])
+  }, [target, tools, settings])
 
   // Auto-execute logic
   useEffect(() => {
@@ -63,18 +70,51 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
       const recommendation = scanPlan.recommendations[currentStep]
       if (!recommendation) return
 
+      // Backoff guard: skip tools that have failed too many times (P3-10).
+      if (failureTrackerRef.current.shouldSkip(recommendation.tool.name)) {
+        setCompletedExecutions((prev) => [
+          ...prev,
+          {
+            id: `auto-${Date.now()}`,
+            toolName: recommendation.tool.name,
+            target,
+            status: 'error',
+            result: `Skipped after repeated failures (backoff)`,
+            timestamp: Date.now(),
+          },
+        ])
+        setCurrentStep((prev) => prev + 1)
+        return
+      }
+
+      // Inter-step variable piping (P3-3): the recommendation may use
+      // `${prev.<tool>.<field>}` references in its target/options string,
+      // resolved against entities extracted from earlier executions.
+      // Use the per-step target from the plan (which is where the LLM
+      // places the placeholders); fall back to the top-level target.
+      const ctx = {
+        prev: entitiesByTool(completedExecutions),
+        entities: { domains: [], subdomains: [], ips: [], urls: [], emails: [], cves: [], hashes: [], ports: [] },
+      }
+      const stepTarget = recommendation.target ?? target
+      const targetRes = substituteVariables(stepTarget, ctx)
+      const resolvedTarget = targetRes.value || target
+      const optsRaw = recommendation.options
+        ? substituteVariables(recommendation.options, ctx).value
+        : ''
+
       try {
         const result = await executeHexstrikeTool(
-          'http://localhost:8888',
+          settings.hexstrikeUrl || 'http://localhost:8888',
           recommendation.tool.name,
-          target,
-          { raw: '' }
+          resolvedTarget,
+          { raw: optsRaw }
         )
 
         const execution: ToolExecution = {
           id: `auto-${Date.now()}`,
           toolName: recommendation.tool.name,
-          target,
+          target: resolvedTarget,
           status: 'done',
           result: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
           timestamp: Date.now(),
@@ -83,14 +123,16 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
         setCompletedExecutions(prev => [...prev, execution])
         addWorkspaceExecution(execution)
         addRecentTool(recommendation.tool.name)
+        failureTrackerRef.current.reset(recommendation.tool.name)
 
         // Move to next step
         setCurrentStep(prev => prev + 1)
       } catch (err: any) {
+        failureTrackerRef.current.record(recommendation.tool.name)
         const execution: ToolExecution = {
           id: `auto-${Date.now()}`,
           toolName: recommendation.tool.name,
-          target,
+          target: resolvedTarget,
           status: 'error',
           result: `Error: ${err?.message ?? String(err)}`,
           timestamp: Date.now(),
@@ -102,6 +144,7 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
     }
 
     executeNext()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRunning, isPaused, currentStep, scanPlan, target])
 
   // Generate analysis when execution completes
@@ -117,6 +160,10 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
 
   const startAutonomousScan = () => {
     if (!target || !scanPlan) return
+    // A new scan is a clean slate — clear any failure history from
+    // previous runs so a tool that failed for `acme.com` isn't skipped
+    // when the user moves on to `example.com`.
+    failureTrackerRef.current = new FailureTracker()
     setIsRunning(true)
     setIsPaused(false)
     setCurrentStep(0)
@@ -134,6 +181,7 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
   }
 
   const resetScan = () => {
+    failureTrackerRef.current = new FailureTracker()
     setIsRunning(false)
     setIsPaused(false)
     setCurrentStep(0)
@@ -219,6 +267,38 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
       {/* Main Content */}
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-5xl mx-auto space-y-6">
+          {/* Loading / connection states */}
+          {hexstrikeLoading && tools.length === 0 && (
+            <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-5">
+              <div className="flex items-center gap-3">
+                <Loader2 size={16} className="text-[#00d4ff] animate-spin" />
+                <span className="text-sm text-[#94a3b8]">Loading tool catalog…</span>
+              </div>
+            </div>
+          )}
+          {!hexstrikeLoading && !hexstrikeConnected && tools.length === 0 && (
+            <div className="bg-[#0f0f1a] border border-[#e63946]/30 rounded-xl p-5">
+              <div className="flex items-center gap-2 text-[#e63946] text-sm font-medium mb-1">
+                <AlertTriangle size={14} />
+                HexStrike backend not reachable
+              </div>
+              <p className="text-xs text-[#94a3b8]">
+                The autonomous planner needs the HexStrike API to enumerate tools.
+                Configure the URL in <span className="text-[#e63946]">Settings</span> and retry.
+              </p>
+            </div>
+          )}
+          {/* Pre-target prompt — distinct from "no tools" */}
+          {!target && tools.length > 0 && (
+            <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-5 text-center">
+              <Target size={28} className="mx-auto text-[#e63946]/60 mb-2" />
+              <p className="text-sm text-[#e2e8f0]">Enter a target below to generate an AI scan plan.</p>
+              <p className="text-[11px] text-[#6b7280] mt-1">
+                Domains, IPs, URLs, emails and usernames are auto-detected.
+              </p>
+            </div>
+          )}
+
           {/* Target Input */}
           <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-5">
             <div className="flex items-center gap-2 mb-4">

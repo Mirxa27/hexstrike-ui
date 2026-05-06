@@ -1,13 +1,16 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
 import type { AISettings, HexstrikeCategory, HexstrikeTool, WorkspaceType, ToolExecution, QuickAction } from './types'
 import { useSettingsStore } from './store'
 import { fetchHexstrikeTools } from './api'
 import { chatHistory } from './chatHistory'
+import { useToaster } from './components/Toaster'
 
 interface AppContextValue {
   settings: AISettings
   updateSettings: (partial: Partial<AISettings>) => void
   resetSettings: () => void
+  /** Wipe API key + base URL from stored settings (P1-5). */
+  clearAllSecrets: () => void
   tools: HexstrikeTool[]
   categories: HexstrikeCategory[]
   activeCategories: Set<string>
@@ -16,6 +19,7 @@ interface AppContextValue {
   activeTools: HexstrikeTool[]
   hexstrikeConnected: boolean
   hexstrikeError: string | null
+  hexstrikeLoading: boolean
   refreshHexstrike: () => void
   sidebarOpen: boolean
   setSidebarOpen: (open: boolean) => void
@@ -39,6 +43,10 @@ interface AppContextValue {
   recentTools: string[]
   addRecentTool: (toolName: string) => void
   quickActions: QuickAction[]
+  // Token usage meter (P3-9)
+  sessionUsage: { in: number; out: number }
+  addSessionUsage: (delta: { in?: number; out?: number }) => void
+  resetSessionUsage: () => void
 }
 
 const QUICK_ACTIONS: QuickAction[] = [
@@ -54,11 +62,13 @@ const AppContext = createContext<AppContextValue | null>(null)
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const { settings, updateSettings, resetSettings } = useSettingsStore()
+  const toaster = useToaster()
   const [tools, setTools] = useState<HexstrikeTool[]>([])
   const [categories, setCategories] = useState<HexstrikeCategory[]>([])
   const [activeCategories, setActiveCategories] = useState<Set<string>>(new Set())
   const [hexstrikeConnected, setHexstrikeConnected] = useState(false)
   const [hexstrikeError, setHexstrikeError] = useState<string | null>(null)
+  const [hexstrikeLoading, setHexstrikeLoading] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
   // Chat History State
@@ -69,8 +79,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceType>('chat')
   const [workspaceExecutions, setWorkspaceExecutions] = useState<ToolExecution[]>([])
   const [recentTools, setRecentTools] = useState<string[]>([])
+  // Per-session token usage (P3-9). Reset whenever the user starts a new
+  // chat or switches conversations so the topbar meter reflects the
+  // *current* chat, not lifetime totals.
+  const [sessionUsage, setSessionUsage] = useState<{ in: number; out: number }>({ in: 0, out: 0 })
+  const addSessionUsage = useCallback((delta: { in?: number; out?: number }) => {
+    setSessionUsage((prev) => ({
+      in: prev.in + (delta.in || 0),
+      out: prev.out + (delta.out || 0),
+    }))
+  }, [])
+  const resetSessionUsage = useCallback(() => setSessionUsage({ in: 0, out: 0 }), [])
+
+  // Auto-reset usage when the active chat changes (incl. new chat = null).
+  useEffect(() => {
+    setSessionUsage({ in: 0, out: 0 })
+  }, [currentChatId])
+
+  // Track previous connection state so we only toast on state transitions.
+  const wasConnectedRef = useRef<boolean | null>(null)
 
   const refreshHexstrike = useCallback(async () => {
+    setHexstrikeLoading(true)
     try {
       setHexstrikeError(null)
       const data = await fetchHexstrikeTools(settings.hexstrikeUrl)
@@ -78,11 +108,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setCategories(data.categories)
       setActiveCategories(new Set(data.categories.map((c) => c.name)))
       setHexstrikeConnected(true)
+      if (wasConnectedRef.current === false) {
+        toaster.success(`HexStrike connected — ${data.tools.length} tools available`)
+      }
+      wasConnectedRef.current = true
     } catch (err: any) {
       setHexstrikeConnected(false)
-      setHexstrikeError(err?.message ?? 'Connection failed')
+      const msg = err?.message ?? 'Connection failed'
+      setHexstrikeError(msg)
+      if (wasConnectedRef.current !== false) {
+        toaster.error(`HexStrike unreachable: ${msg}`, {
+          action: { label: 'Retry', onClick: () => { void refreshHexstrike() } },
+        })
+      }
+      wasConnectedRef.current = false
+    } finally {
+      setHexstrikeLoading(false)
     }
-  }, [settings.hexstrikeUrl])
+  }, [settings.hexstrikeUrl, toaster])
+
+  const clearAllSecrets = useCallback(() => {
+    updateSettings({ apiKey: '', baseUrl: '' })
+    toaster.success('All stored API keys & base URLs have been cleared.')
+  }, [updateSettings, toaster])
 
   useEffect(() => {
     refreshHexstrike()
@@ -161,9 +209,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       id: `exec-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       timestamp: Date.now(),
     }
-    setWorkspaceExecutions((prev) => [...prev, newExec])
-    // Keep only last 50 executions
-    setWorkspaceExecutions((prev) => prev.slice(-50))
+    // Single setter that both appends and trims to the most recent 50.
+    // The previous implementation called setWorkspaceExecutions twice —
+    // under React 18+ batching, the second call's `prev` could be the
+    // *pre-append* array, silently dropping the new exec.
+    setWorkspaceExecutions((prev) => {
+      const merged = [...prev, newExec]
+      return merged.length > 50 ? merged.slice(-50) : merged
+    })
   }, [])
 
   const clearWorkspaceExecutions = useCallback(() => {
@@ -192,6 +245,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         settings,
         updateSettings,
         resetSettings,
+        clearAllSecrets,
         tools,
         categories,
         activeCategories,
@@ -200,6 +254,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         activeTools,
         hexstrikeConnected,
         hexstrikeError,
+        hexstrikeLoading,
         refreshHexstrike,
         sidebarOpen,
         setSidebarOpen,
@@ -223,6 +278,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         recentTools,
         addRecentTool,
         quickActions: QUICK_ACTIONS,
+        sessionUsage,
+        addSessionUsage,
+        resetSessionUsage,
       }}
     >
       {children}

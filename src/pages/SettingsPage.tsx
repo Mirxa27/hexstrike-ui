@@ -15,12 +15,14 @@ import {
   Terminal,
   Palette,
   Zap,
+  Trash2,
 } from 'lucide-react'
 import { Provider } from '../types'
 import type { AISettings } from '../types'
 import { useApp } from '../AppContext'
 import { fetchModels } from '../api'
 import { fetchHexstrikeTools } from '../api'
+import { useToaster } from '../components/Toaster'
 
 // ── Provider definitions ─────────────────────────────────────────────────────
 
@@ -127,7 +129,8 @@ function Field({
 // ── Main SettingsPage ────────────────────────────────────────────────────────
 
 export function SettingsPage() {
-  const { settings, updateSettings, resetSettings, refreshHexstrike } = useApp()
+  const { settings, updateSettings, resetSettings, refreshHexstrike, clearAllSecrets } = useApp()
+  const toaster = useToaster()
 
   // Local draft state
   const [draft, setDraft] = useState<AISettings>({ ...settings })
@@ -138,7 +141,10 @@ export function SettingsPage() {
   const [connectionStatus, setConnectionStatus] = useState<{
     ok: boolean
     message: string
+    latencyMs?: number
   } | null>(null)
+  const [verifyingKey, setVerifyingKey] = useState(false)
+  const [keyStatus, setKeyStatus] = useState<{ ok: boolean; message: string } | null>(null)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
 
   // Sync draft if settings change externally
@@ -168,30 +174,62 @@ export function SettingsPage() {
   const handleTestConnection = useCallback(async () => {
     setTestingConnection(true)
     setConnectionStatus(null)
+    const t0 = performance.now()
     try {
       const data = await fetchHexstrikeTools(draft.hexstrikeUrl)
+      const latencyMs = Math.round(performance.now() - t0)
       setConnectionStatus({
         ok: true,
-        message: `Connected — ${data.tools.length} tools, ${data.categories.length} categories`,
+        message: `Connected — ${data.tools.length} tools, ${data.categories.length} categories (${latencyMs} ms)`,
+        latencyMs,
       })
     } catch (err: any) {
-      setConnectionStatus({ ok: false, message: err?.message ?? 'Connection failed' })
+      const latencyMs = Math.round(performance.now() - t0)
+      setConnectionStatus({
+        ok: false,
+        message: `${err?.message ?? 'Connection failed'} (${latencyMs} ms)`,
+        latencyMs,
+      })
     } finally {
       setTestingConnection(false)
     }
   }, [draft.hexstrikeUrl])
+
+  // Verify the configured API key by issuing a model-list request to the
+  // currently selected provider. Successful round-trip means the key is
+  // accepted; failure means it's rejected, missing, or the endpoint is
+  // unreachable. Local providers (lmstudio/ollama) skip the key check.
+  const handleVerifyKey = useCallback(async () => {
+    setVerifyingKey(true)
+    setKeyStatus(null)
+    try {
+      const t0 = performance.now()
+      const models = await fetchModels(draft)
+      const latencyMs = Math.round(performance.now() - t0)
+      setKeyStatus({
+        ok: true,
+        message: `API key accepted — ${models.length} models reachable (${latencyMs} ms)`,
+      })
+    } catch (err: any) {
+      setKeyStatus({ ok: false, message: err?.message ?? 'API key verification failed' })
+    } finally {
+      setVerifyingKey(false)
+    }
+  }, [draft])
 
   // Save
   const handleSave = () => {
     updateSettings(draft)
     refreshHexstrike()
     setToast({ message: 'Settings saved successfully', type: 'success' })
+    toaster.success('Settings saved')
   }
 
   // Reset
   const handleReset = () => {
     resetSettings()
     setToast({ message: 'Settings reset to defaults', type: 'success' })
+    toaster.info('Settings reset to defaults')
   }
 
   const inputClass =
@@ -240,7 +278,10 @@ export function SettingsPage() {
 
             {/* API Key */}
             {!currentProvider?.noKey && (
-              <Field label="API Key" hint="Your API key is stored locally and never sent anywhere except the provider.">
+              <Field
+                label="API Key"
+                hint="⚠️  Stored in your browser's localStorage and sent directly from the browser to the provider. Anyone with XSS access to this origin can exfiltrate it. Do not paste production keys on shared machines."
+              >
                 <div className="relative">
                   <input
                     type={showKey ? 'text' : 'password'}
@@ -248,14 +289,42 @@ export function SettingsPage() {
                     onChange={(e) => patch({ apiKey: e.target.value })}
                     placeholder={`Enter your ${currentProvider?.label ?? ''} API key`}
                     className={`${inputClass} pr-10`}
+                    autoComplete="off"
+                    spellCheck={false}
                   />
                   <button
                     type="button"
                     onClick={() => setShowKey(!showKey)}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-[#6b7280] hover:text-[#94a3b8]"
+                    title={showKey ? 'Hide API key (recommended for screenshots)' : 'Reveal API key'}
                   >
                     {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
                   </button>
+                </div>
+                <div className="flex items-center gap-3 mt-2">
+                  <button
+                    type="button"
+                    onClick={handleVerifyKey}
+                    disabled={verifyingKey || !draft.apiKey}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#0a0a0f] border border-[#1a1a2e] rounded text-[11px] text-[#94a3b8] hover:text-[#e2e8f0] hover:border-[#00d4ff]/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {verifyingKey ? (
+                      <Loader2 size={11} className="animate-spin text-[#00d4ff]" />
+                    ) : (
+                      <Zap size={11} className="text-[#00d4ff]" />
+                    )}
+                    Verify API key
+                  </button>
+                  {keyStatus && (
+                    <span
+                      className={`text-[11px] flex items-center gap-1 ${
+                        keyStatus.ok ? 'text-[#00ff41]' : 'text-[#e63946]'
+                      }`}
+                    >
+                      {keyStatus.ok ? <CheckCircle size={11} /> : <XCircle size={11} />}
+                      {keyStatus.message}
+                    </span>
+                  )}
                 </div>
               </Field>
             )}
@@ -501,14 +570,30 @@ export function SettingsPage() {
         </Section>
 
         {/* ─── Action buttons ─── */}
-        <div className="flex items-center justify-between pb-8">
-          <button
-            onClick={handleReset}
-            className="flex items-center gap-2 px-4 py-2 border border-[#1a1a2e] rounded text-xs text-[#6b7280] hover:text-[#e2e8f0] hover:border-[#e63946]/30 transition-colors"
-          >
-            <RotateCcw size={13} />
-            Reset to defaults
-          </button>
+        <div className="flex items-center justify-between pb-8 gap-3 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handleReset}
+              className="flex items-center gap-2 px-4 py-2 border border-[#1a1a2e] rounded text-xs text-[#6b7280] hover:text-[#e2e8f0] hover:border-[#e63946]/30 transition-colors"
+            >
+              <RotateCcw size={13} />
+              Reset to defaults
+            </button>
+            <button
+              onClick={() => {
+                if (confirm('Wipe stored API key and base URL from this browser? This cannot be undone.')) {
+                  clearAllSecrets()
+                  setDraft((d) => ({ ...d, apiKey: '', baseUrl: '' }))
+                  setKeyStatus(null)
+                }
+              }}
+              className="flex items-center gap-2 px-4 py-2 border border-[#1a1a2e] rounded text-xs text-[#e63946] hover:bg-[#e63946]/10 transition-colors"
+              title="Remove API key + base URL from localStorage"
+            >
+              <Trash2 size={13} />
+              Clear all secrets
+            </button>
+          </div>
           <button
             onClick={handleSave}
             className="flex items-center gap-2 px-6 py-2 bg-[#e63946] hover:bg-[#c1121f] rounded text-sm text-white font-medium transition-colors"

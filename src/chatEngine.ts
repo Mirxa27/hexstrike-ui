@@ -1,13 +1,37 @@
 import { Provider } from './types'
 import type { AISettings, HexstrikeTool, Message, ToolCall } from './types'
 import { executeHexstrikeTool } from './api'
+import {
+  truncateForBudget,
+  isReasoningModel,
+  suggestReasoningEffort,
+  FailureTracker,
+  readUsageFromChunk,
+  type TokenUsage,
+} from './agent'
 
 export type ChatEvent =
   | { type: 'text'; content: string }
   | { type: 'tool_call'; toolCall: ToolCall }
   | { type: 'tool_result'; toolCallId: string; result: string }
+  | { type: 'usage'; usage: TokenUsage }
   | { type: 'done' }
   | { type: 'error'; error: string }
+
+// Maximum agent rounds (P3-10). Higher than the previous 10 because the
+// reflective loop legitimately needs more turns; the FailureTracker
+// guards against runaway tool-spam.
+const MAX_AGENT_ROUNDS = 25
+
+/**
+ * Compute the per-tool-result token budget. We aim to keep no more
+ * than ~40% of the model's context window occupied by tool output so
+ * there's room for the model's final response.
+ */
+function toolResultBudget(settings: AISettings): number {
+  const cw = settings.contextWindow || 128_000
+  return Math.max(2000, Math.floor((cw * 0.4) / 4)) // chars budget, then tokens
+}
 
 // ─── Tool name validation ────────────────────────────────────────────────────
 // All providers require function names matching ^[a-zA-Z0-9_-]{1,64}$
@@ -194,7 +218,8 @@ async function parseErrorBody(res: Response): Promise<string> {
 async function* openAIStream(
   settings: AISettings,
   messages: Message[],
-  tools: HexstrikeTool[]
+  tools: HexstrikeTool[],
+  signal?: AbortSignal
 ): AsyncGenerator<ChatEvent> {
   const base = resolveBase(settings)
   const openAIMessages = buildOpenAIMessages(settings, messages)
@@ -203,8 +228,10 @@ async function* openAIStream(
   let withTools = !!toolDefs
 
   let turnMessages: any[] = [...openAIMessages]
+  const failures = new FailureTracker()
+  const budget = toolResultBudget(settings)
 
-  for (let round = 0; round < 10; round++) {
+  for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
     const body: Record<string, any> = {
       model: settings.model,
       messages: turnMessages,
@@ -215,6 +242,25 @@ async function* openAIStream(
     body.max_tokens = settings.maxTokens
     body.max_completion_tokens = settings.maxTokens
 
+    // Ask OpenAI-compatible providers (openai, groq, mistral) to emit
+    // a final usage chunk in the SSE stream — without this, the stream
+    // ends without the {prompt_tokens, completion_tokens} payload that
+    // the topbar token meter relies on. Local providers (lmstudio,
+    // ollama) don't honour this option but accepting the extra field
+    // is harmless on their side.
+    if (
+      settings.provider === Provider.openai ||
+      settings.provider === Provider.groq ||
+      settings.provider === Provider.mistral ||
+      settings.provider === Provider.custom
+    ) {
+      body.stream_options = { include_usage: true }
+    }
+
+    // Reasoning models (o1/o3) — surface effort knob (P3-8).
+    const effort = suggestReasoningEffort(settings)
+    if (effort) body.reasoning_effort = effort
+
     if (withTools && toolDefs?.length) body.tools = toolDefs
 
     const headers: Record<string, string> = {
@@ -224,6 +270,7 @@ async function* openAIStream(
 
     let res = await fetch(`${base}/chat/completions`, {
       method: 'POST',
+      signal,
       headers,
       body: JSON.stringify(body),
     })
@@ -236,6 +283,7 @@ async function* openAIStream(
       delete retryBody.tools
       res = await fetch(`${base}/chat/completions`, {
         method: 'POST',
+        signal,
         headers,
         body: JSON.stringify(retryBody),
       })
@@ -257,6 +305,8 @@ async function* openAIStream(
         yield { type: 'error', error: chunk.error.message ?? JSON.stringify(chunk.error) }
         return
       }
+      const usage = readUsageFromChunk(chunk)
+      if (usage) yield { type: 'usage', usage: { in: usage.in || 0, out: usage.out || 0 } }
       const delta = chunk.choices?.[0]?.delta
       if (!delta) continue
 
@@ -289,13 +339,19 @@ async function* openAIStream(
       })),
     }]
 
-    for (const tc of toolCallList) {
+    // Execute tool calls in parallel (P3-4). The provider may emit
+    // multiple calls in one response; running them serially throws away
+    // that opportunity for concurrency.
+    const callResults = await Promise.all(toolCallList.map(async (tc) => {
       let args: Record<string, any> = {}
       try { args = JSON.parse(tc.argsRaw) } catch { args = {} }
+      const callId = tc.id || String(Date.now())
 
-      yield { type: 'tool_call', toolCall: { id: tc.id || String(Date.now()), name: tc.name, arguments: args, status: 'running' } }
+      // Backoff guard (P3-10)
+      if (failures.shouldSkip(tc.name)) {
+        return { tc, callId, args, resultStr: `Skipped: tool "${tc.name}" failed too many times this session.` }
+      }
 
-      let resultStr: string
       try {
         const result = await executeHexstrikeTool(
           settings.hexstrikeUrl,
@@ -303,13 +359,21 @@ async function* openAIStream(
           args.target ?? '',
           args.options ? { raw: args.options } : undefined
         )
-        resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
-        yield { type: 'tool_result', toolCallId: tc.id, result: resultStr }
+        const raw = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+        const resultStr = truncateForBudget(raw, budget)
+        failures.reset(tc.name)
+        return { tc, callId, args, resultStr }
       } catch (err: any) {
-        resultStr = `Tool error: ${err?.message ?? String(err)}`
-        yield { type: 'tool_result', toolCallId: tc.id, result: resultStr }
+        failures.record(tc.name)
+        return { tc, callId, args, resultStr: `Tool error: ${err?.message ?? String(err)}` }
       }
+    }))
 
+    // Yield events in submission order so the UI renders the tool cards
+    // in the same order the provider asked for them.
+    for (const { tc, callId, args, resultStr } of callResults) {
+      yield { type: 'tool_call', toolCall: { id: callId, name: tc.name, arguments: args, status: 'running' } }
+      yield { type: 'tool_result', toolCallId: callId, result: resultStr }
       turnMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultStr } as any)
     }
   }
@@ -322,7 +386,8 @@ async function* openAIStream(
 async function* anthropicStream(
   settings: AISettings,
   messages: Message[],
-  tools: HexstrikeTool[]
+  tools: HexstrikeTool[],
+  signal?: AbortSignal
 ): AsyncGenerator<ChatEvent> {
   const systemPrompt = settings.systemPrompt || 'You are HexStrike AI, an advanced cybersecurity assistant.'
   const anthropicMessages = messages
@@ -332,8 +397,10 @@ async function* anthropicStream(
   const safeTools = sanitizeTools(tools)
   const toolDefs = safeTools.length ? buildAnthropicTools(safeTools) : undefined
   let turnMessages: any[] = [...anthropicMessages]
+  const failures = new FailureTracker()
+  const budget = toolResultBudget(settings)
 
-  for (let round = 0; round < 10; round++) {
+  for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
     const body: any = {
       model: settings.model,
       max_tokens: settings.maxTokens,
@@ -342,9 +409,14 @@ async function* anthropicStream(
       stream: true,
     }
     if (toolDefs?.length) body.tools = toolDefs
+    // Claude reasoning models: enable extended thinking but keep deltas hidden
+    if (isReasoningModel(settings.model)) {
+      body.thinking = { type: 'enabled', budget_tokens: 2000 }
+    }
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal,
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': settings.apiKey,
@@ -370,6 +442,9 @@ async function* anthropicStream(
       const evType = event.type
       if (!evType) continue
 
+      const usage = readUsageFromChunk(event)
+      if (usage) yield { type: 'usage', usage: { in: usage.in || 0, out: usage.out || 0 } }
+
       if (evType === 'content_block_start') {
         const block = event.content_block
         if (block?.type === 'tool_use') {
@@ -384,6 +459,8 @@ async function* anthropicStream(
         } else if (delta?.type === 'input_json_delta' && currentToolId) {
           pendingToolCalls[currentToolId].inputRaw += delta.partial_json
         }
+        // delta.type === 'thinking_delta' is intentionally not surfaced —
+        // reasoning tokens stay hidden behind the "Show reasoning" toggle.
       } else if (evType === 'message_stop') {
         break
       } else if (evType === 'error') {
@@ -404,23 +481,30 @@ async function* anthropicStream(
     }
     turnMessages = [...turnMessages, { role: 'assistant', content: assistantContent }]
 
-    const toolResultContent: any[] = []
-    for (const tc of toolCallList) {
+    // Parallel tool execution (P3-4)
+    const callResults = await Promise.all(toolCallList.map(async (tc) => {
       let args: Record<string, any> = {}
       try { args = JSON.parse(tc.inputRaw) } catch { args = {} }
-
-      yield { type: 'tool_call', toolCall: { id: tc.id, name: tc.name, arguments: args, status: 'running' } }
-
-      let resultStr: string
+      if (failures.shouldSkip(tc.name)) {
+        return { tc, args, resultStr: `Skipped: tool "${tc.name}" failed too many times this session.` }
+      }
       try {
         const params = args.options ? { raw: String(args.options) } : undefined
         const result = await executeHexstrikeTool(settings.hexstrikeUrl, tc.name, args.target ?? '', params)
-        resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
-        yield { type: 'tool_result', toolCallId: tc.id, result: resultStr }
+        const raw = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+        const resultStr = truncateForBudget(raw, budget)
+        failures.reset(tc.name)
+        return { tc, args, resultStr }
       } catch (err: any) {
-        resultStr = `Tool error: ${err?.message ?? String(err)}`
-        yield { type: 'tool_result', toolCallId: tc.id, result: resultStr }
+        failures.record(tc.name)
+        return { tc, args, resultStr: `Tool error: ${err?.message ?? String(err)}` }
       }
+    }))
+
+    const toolResultContent: any[] = []
+    for (const { tc, args, resultStr } of callResults) {
+      yield { type: 'tool_call', toolCall: { id: tc.id, name: tc.name, arguments: args, status: 'running' } }
+      yield { type: 'tool_result', toolCallId: tc.id, result: resultStr }
       toolResultContent.push({ type: 'tool_result', tool_use_id: tc.id, content: resultStr })
     }
     turnMessages = [...turnMessages, { role: 'user', content: toolResultContent }]
@@ -434,7 +518,8 @@ async function* anthropicStream(
 async function* googleStream(
   settings: AISettings,
   messages: Message[],
-  tools: HexstrikeTool[]
+  tools: HexstrikeTool[],
+  signal?: AbortSignal
 ): AsyncGenerator<ChatEvent> {
   const model = settings.model || 'gemini-2.0-flash'
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${settings.apiKey}&alt=sse`
@@ -446,8 +531,10 @@ async function* googleStream(
   const safeTools = sanitizeTools(tools)
   const toolDefs = safeTools.length ? buildGoogleTools(safeTools) : undefined
   let turnMessages: any[] = [...geminiMessages]
+  const failures = new FailureTracker()
+  const budget = toolResultBudget(settings)
 
-  for (let round = 0; round < 10; round++) {
+  for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
     const body: any = {
       contents: turnMessages,
       generationConfig: { temperature: settings.temperature, maxOutputTokens: settings.maxTokens },
@@ -457,6 +544,7 @@ async function* googleStream(
 
     const res = await fetch(url, {
       method: 'POST',
+      signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
@@ -473,6 +561,8 @@ async function* googleStream(
     for await (const raw of streamSSE(res)) {
       let chunk: any
       try { chunk = JSON.parse(raw) } catch { continue }
+      const usage = readUsageFromChunk(chunk)
+      if (usage) yield { type: 'usage', usage: { in: usage.in || 0, out: usage.out || 0 } }
       for (const part of chunk.candidates?.[0]?.content?.parts ?? []) {
         if (part.text) { assistantText += part.text; yield { type: 'text', content: part.text } }
         if (part.functionCall) functionCalls.push({ name: part.functionCall.name, args: part.functionCall.args ?? {} })
@@ -486,21 +576,29 @@ async function* googleStream(
     for (const fc of functionCalls) modelParts.push({ functionCall: { name: fc.name, args: fc.args } })
     turnMessages = [...turnMessages, { role: 'model', parts: modelParts }]
 
-    const functionResponseParts: any[] = []
-    for (const fc of functionCalls) {
-      const tcId = `${fc.name}-${Date.now()}`
-      yield { type: 'tool_call', toolCall: { id: tcId, name: fc.name, arguments: fc.args, status: 'running' } }
-
-      let resultStr: string
+    // Parallel execution (P3-4)
+    const callResults = await Promise.all(functionCalls.map(async (fc) => {
+      const tcId = `${fc.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      if (failures.shouldSkip(fc.name)) {
+        return { fc, tcId, resultStr: `Skipped: tool "${fc.name}" failed too many times this session.` }
+      }
       try {
         const params = fc.args.options ? { raw: String(fc.args.options) } : undefined
         const result = await executeHexstrikeTool(settings.hexstrikeUrl, fc.name, fc.args.target ?? '', params)
-        resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
-        yield { type: 'tool_result', toolCallId: tcId, result: resultStr }
+        const raw = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+        const resultStr = truncateForBudget(raw, budget)
+        failures.reset(fc.name)
+        return { fc, tcId, resultStr }
       } catch (err: any) {
-        resultStr = `Tool error: ${err?.message ?? String(err)}`
-        yield { type: 'tool_result', toolCallId: tcId, result: resultStr }
+        failures.record(fc.name)
+        return { fc, tcId, resultStr: `Tool error: ${err?.message ?? String(err)}` }
       }
+    }))
+
+    const functionResponseParts: any[] = []
+    for (const { fc, tcId, resultStr } of callResults) {
+      yield { type: 'tool_call', toolCall: { id: tcId, name: fc.name, arguments: fc.args, status: 'running' } }
+      yield { type: 'tool_result', toolCallId: tcId, result: resultStr }
       functionResponseParts.push({ functionResponse: { name: fc.name, response: { result: resultStr } } })
     }
     turnMessages = [...turnMessages, { role: 'user', parts: functionResponseParts }]
@@ -587,7 +685,8 @@ function trimMessagesToFit(
 export async function* streamChat(
   settings: AISettings,
   messages: Message[],
-  tools: HexstrikeTool[]
+  tools: HexstrikeTool[],
+  signal?: AbortSignal
 ): AsyncGenerator<ChatEvent> {
   if (!settings.model) {
     yield { type: 'error', error: 'No model selected — go to ⚙ Settings to configure your AI provider.' }
@@ -608,11 +707,15 @@ export async function* streamChat(
 
   try {
     switch (settings.provider) {
-      case Provider.anthropic: yield* anthropicStream(settings, trimmedMessages, tools); break
-      case Provider.google:    yield* googleStream(settings, trimmedMessages, tools); break
-      default:                 yield* openAIStream(settings, trimmedMessages, tools); break
+      case Provider.anthropic: yield* anthropicStream(settings, trimmedMessages, tools, signal); break
+      case Provider.google:    yield* googleStream(settings, trimmedMessages, tools, signal); break
+      default:                 yield* openAIStream(settings, trimmedMessages, tools, signal); break
     }
   } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      yield { type: 'error', error: 'Stopped by user.' }
+      return
+    }
     const msg = err?.message ?? String(err)
     // Translate browser network errors into actionable messages
     if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('ECONNREFUSED')) {

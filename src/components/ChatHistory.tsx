@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import type { Message } from '../types'
 import { useApp } from '../AppContext'
+import { useToaster } from './Toaster'
 
 interface ChatHistorySidebarProps {
   open: boolean
@@ -33,6 +34,7 @@ export function ChatHistorySidebar({ open, onClose, onLoadChat, currentMessages 
 
   const [searchQuery, setSearchQuery] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const toaster = useToaster()
 
   // Auto-save current chat when messages change
   useEffect(() => {
@@ -94,19 +96,28 @@ export function ChatHistorySidebar({ open, onClose, onLoadChat, currentMessages 
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) {
-      const reader = new FileReader()
-      reader.onload = (ev) => {
-        const content = ev.target?.result as string
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const content = ev.target?.result as string
+      try {
         const result = importChats(content)
         if (result.success) {
-          alert(`Imported ${result.imported} chats`)
+          toaster.success(`Imported ${result.imported} chat${result.imported === 1 ? '' : 's'}`)
         } else {
-          alert('Failed to import chats')
+          toaster.error('Failed to import chats — file may be corrupt or in an unsupported format')
         }
+      } catch (err: any) {
+        toaster.error(`Import failed: ${err?.message ?? 'unknown error'}`)
+      } finally {
+        if (fileInputRef.current) fileInputRef.current.value = ''
       }
-      reader.readAsText(file)
     }
+    reader.onerror = () => {
+      toaster.error('Could not read the selected file')
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+    reader.readAsText(file)
   }
 
   const formatDate = (timestamp: number) => {

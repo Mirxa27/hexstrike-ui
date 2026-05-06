@@ -144,7 +144,7 @@ const WORKSPACE_CONFIGS: Record<
 
 export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
   const config = WORKSPACE_CONFIGS[workspaceType]
-  const { addWorkspaceExecution, addRecentTool, workspaceExecutions, setWorkspaceExecutions } = useApp()
+  const { addWorkspaceExecution, addRecentTool, workspaceExecutions, setWorkspaceExecutions, hexstrikeLoading, hexstrikeConnected, settings } = useApp()
 
   const [forms, setForms] = useState<ToolForm[]>([
     { toolName: config.commonTools[0] || '', target: '', options: '', advancedOptions: {} },
@@ -198,7 +198,7 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
     try {
       const params = form.options ? { raw: form.options } : undefined
       const result = await executeHexstrikeTool(
-        'http://localhost:8888',
+        settings.hexstrikeUrl || 'http://localhost:8888',
         form.toolName,
         form.target,
         params
@@ -307,6 +307,25 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
                 ))}
               </div>
             </div>
+
+          {/* Differentiated empty state */}
+          {workspaceTools.length === 0 && (
+            hexstrikeLoading ? (
+              <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-4 flex items-center gap-3">
+                <Loader2 size={14} className="text-[#00d4ff] animate-spin" />
+                <span className="text-xs text-[#94a3b8]">Loading {workspaceType} tools…</span>
+              </div>
+            ) : !hexstrikeConnected ? (
+              <div className="bg-[#0f0f1a] border border-[#e63946]/30 rounded-xl p-4 text-xs text-[#94a3b8]">
+                HexStrike backend is not reachable — connect it from Settings to populate this workspace.
+              </div>
+            ) : (
+              <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-4 text-xs text-[#6b7280]">
+                No tools registered for the <span className="text-[#e63946]">{workspaceType}</span> category on this backend.
+                You can still type any tool name manually below.
+              </div>
+            )
+          )}
 
           {/* Tool Forms */}
           {forms.map((form, index) => (

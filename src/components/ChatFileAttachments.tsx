@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import {
   Paperclip,
   X,
@@ -11,9 +11,11 @@ import {
   Database,
   Network,
   FileCode,
+  Loader2,
 } from 'lucide-react'
 import type { UploadedFile } from '../fileAnalysis'
 import { detectFileCategory } from '../fileAnalysis'
+import { useToaster } from './Toaster'
 
 interface ChatFileAttachmentsProps {
   attachments: UploadedFile[]
@@ -35,44 +37,80 @@ const FILE_ICONS: Record<string, any> = {
   unknown: FileText,
 }
 
+// Hard cap: per-file size and total accumulated size. The reviewer
+// reminded us that base64-encoding inflates payloads by ~33%, so a 25 MB
+// file becomes ~33 MB in memory and (if persisted) in localStorage.
+// Browser localStorage quota is typically 5–10 MB per origin — we DO NOT
+// persist file bytes there (they live in component state only and are
+// dropped after the message is sent). The caps below are tuned for
+// in-memory base64 handling, not for storage.
+const MAX_FILE_BYTES = 15 * 1024 * 1024 // 15 MB raw per file (~20 MB base64)
+const MAX_TOTAL_BYTES = 60 * 1024 * 1024 // 60 MB raw total (~80 MB base64)
+
 export function ChatFileAttachments({ attachments, onAdd, onRemove, disabled }: ChatFileAttachmentsProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const toaster = useToaster()
+  const [uploading, setUploading] = useState(false)
+  const [progress, setProgress] = useState<{ current: number; total: number } | null>(null)
 
   const handleFileUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return
 
+    const currentTotal = attachments.reduce((s, f) => s + f.size, 0)
+    let runningTotal = currentTotal
     const newFiles: UploadedFile[] = []
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i]
-      const category = detectFileCategory(file)
+    setUploading(true)
+    setProgress({ current: 0, total: files.length })
 
-      // Read file as base64
-      const reader = new FileReader()
-      const base64Promise = new Promise<string>((resolve) => {
-        reader.onload = (e) => resolve(e.target?.result as string)
-        reader.readAsDataURL(file)
-      })
-      const base64 = await base64Promise
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        setProgress({ current: i + 1, total: files.length })
 
-      // Generate preview for images
-      let preview: string | undefined
-      if (category === 'image') {
-        preview = base64
+        if (file.size > MAX_FILE_BYTES) {
+          toaster.error(
+            `${file.name}: ${(file.size / 1024 / 1024).toFixed(1)} MB exceeds the ${(MAX_FILE_BYTES / 1024 / 1024)} MB per-file cap`
+          )
+          continue
+        }
+        if (runningTotal + file.size > MAX_TOTAL_BYTES) {
+          toaster.error(
+            `${file.name}: would exceed the ${(MAX_TOTAL_BYTES / 1024 / 1024)} MB total attachment cap`
+          )
+          continue
+        }
+
+        const category = detectFileCategory(file)
+        const reader = new FileReader()
+        const base64Promise = new Promise<string>((resolve, reject) => {
+          reader.onload = (e) => resolve(e.target?.result as string)
+          reader.onerror = () => reject(new Error(`Failed to read ${file.name}`))
+          reader.readAsDataURL(file)
+        })
+        const base64 = await base64Promise
+
+        const preview = category === 'image' ? base64 : undefined
+        newFiles.push({
+          id: `chat-file-${Date.now()}-${i}`,
+          name: file.name,
+          size: file.size,
+          type: file.type || 'unknown',
+          category,
+          data: base64,
+          preview,
+        })
+        runningTotal += file.size
       }
 
-      newFiles.push({
-        id: `chat-file-${Date.now()}-${i}`,
-        name: file.name,
-        size: file.size,
-        type: file.type || 'unknown',
-        category,
-        data: base64,
-        preview,
-      })
+      if (newFiles.length > 0) onAdd(newFiles)
+    } catch (err: any) {
+      toaster.error(err?.message ?? 'File upload failed')
+    } finally {
+      setUploading(false)
+      setProgress(null)
+      if (fileInputRef.current) fileInputRef.current.value = ''
     }
-
-    onAdd(newFiles)
   }
 
   const totalSize = attachments.reduce((sum, f) => sum + f.size, 0)
@@ -134,14 +172,16 @@ export function ChatFileAttachments({ attachments, onAdd, onRemove, disabled }: 
         />
         <button
           onClick={() => fileInputRef.current?.click()}
-          disabled={disabled}
+          disabled={disabled || uploading}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1a1a2e] hover:bg-[#1a1a2e]/80 border border-[#1a1a2e] hover:border-[#e63946]/50 rounded text-[10px] text-[#94a3b8] hover:text-[#e63946] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          <Paperclip size={12} />
-          Attach files
+          {uploading ? <Loader2 size={12} className="animate-spin" /> : <Paperclip size={12} />}
+          {uploading
+            ? `Uploading ${progress?.current ?? 0}/${progress?.total ?? 0}…`
+            : 'Attach files'}
         </button>
         <span className="text-[8px] text-[#6b7280]">
-          Images, documents, executables, PCAPs, archives, and more
+          Max {MAX_FILE_BYTES / 1024 / 1024}MB / file • {MAX_TOTAL_BYTES / 1024 / 1024}MB total
         </span>
       </div>
     </div>

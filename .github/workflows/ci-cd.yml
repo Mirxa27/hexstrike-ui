@@ -32,8 +32,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run lint
+        # Marked continue-on-error while the 86 pre-existing lint errors
+        # in the repo are worked through. Removing `|| true` ensures the
+        # step now reports a real failure status in PR checks (was
+        # previously masked entirely), but doesn't block the rest of the
+        # pipeline. Drop `continue-on-error` once the legacy lint debt
+        # is cleared to make this a hard gate.
+        continue-on-error: true
+        run: npm run lint
+
       - name: Run type check
-        run: npm run type-check || npx tsc --noEmit
+        run: npm run typecheck
+
+      - name: Run unit tests
+        run: npm test
 
       - name: Build application
         run: npm run build

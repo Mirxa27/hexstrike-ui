@@ -23,6 +23,12 @@ import {
   Upload,
 } from 'lucide-react'
 import { useApp } from '../AppContext'
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
 import { ChatHistorySidebar } from './ChatHistory'
 import { WorkspacePanel } from './WorkspacePanel'
 import { AutonomousWorkspace } from './AutonomousWorkspace'
@@ -72,12 +78,15 @@ export function Layout() {
     setAllCategories,
     hexstrikeConnected,
     hexstrikeError,
+    hexstrikeLoading,
     refreshHexstrike,
     tools,
     sidebarOpen,
     setSidebarOpen,
     activeWorkspace,
     setActiveWorkspace,
+    sessionUsage,
+    resetSessionUsage,
   } = useApp()
   const isSettingsPage = location.pathname === '/settings'
 
@@ -158,6 +167,19 @@ export function Layout() {
             <History size={14} />
           </button>
 
+          {/* Token usage meter (P3-9) — clicking resets the per-session counter */}
+          {(sessionUsage.in > 0 || sessionUsage.out > 0) && (
+            <button
+              onClick={resetSessionUsage}
+              className="ml-2 flex items-center gap-1 text-[10px] font-mono text-[#6b7280] hover:text-[#e2e8f0] px-2 py-1 border border-[#1a1a2e] rounded"
+              title={`Click to reset. Session: ${sessionUsage.in} in / ${sessionUsage.out} out tokens`}
+            >
+              <span className="text-[#00d4ff]">↑{formatTokenCount(sessionUsage.in)}</span>
+              <span className="text-[#94a3b8]">/</span>
+              <span className="text-[#00ff41]">↓{formatTokenCount(sessionUsage.out)}</span>
+            </button>
+          )}
+
           {/* Settings */}
           <NavLink
             to="/settings"
@@ -237,7 +259,33 @@ export function Layout() {
 
             {/* Category list */}
             <div className="flex-1 overflow-y-auto py-2">
-              {categories.length === 0 ? (
+              {hexstrikeLoading && categories.length === 0 ? (
+                // Skeleton loading state while initial fetch is in flight
+                <div className="px-3 py-2 space-y-2" aria-busy="true" aria-label="Loading tool categories">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="h-7 rounded bg-[#1a1a2e]/40 animate-pulse"
+                      style={{ animationDelay: `${i * 80}ms` }}
+                    />
+                  ))}
+                </div>
+              ) : !hexstrikeConnected && hexstrikeError ? (
+                <div className="px-4 py-6 text-center space-y-3">
+                  <Zap size={24} className="mx-auto text-[#e63946]" />
+                  <div>
+                    <p className="text-xs font-medium text-[#e63946] mb-1">Backend unreachable</p>
+                    <p className="text-[10px] text-[#6b7280] break-words">{hexstrikeError}</p>
+                  </div>
+                  <button
+                    onClick={refreshHexstrike}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border border-[#e63946]/40 text-[#e63946] hover:bg-[#e63946]/10 transition-colors"
+                  >
+                    <RefreshCw size={12} />
+                    Retry connection
+                  </button>
+                </div>
+              ) : categories.length === 0 ? (
                 <div className="px-4 py-8 text-center">
                   <Zap size={24} className="mx-auto mb-2 text-[#1a1a2e]" />
                   <p className="text-xs text-[#6b7280]">

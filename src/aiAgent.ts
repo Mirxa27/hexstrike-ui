@@ -1,4 +1,5 @@
-import type { HexstrikeTool, ToolExecution } from './types'
+import type { HexstrikeTool, ToolExecution, AISettings } from './types'
+import { planWithLLM, type LLMScanPlan } from './agent'
 
 export interface AIRecommendation {
   tool: HexstrikeTool
@@ -6,6 +7,10 @@ export interface AIRecommendation {
   priority: 'critical' | 'high' | 'medium' | 'low'
   estimatedTime: string
   dependsOn?: string[]
+  /** Per-step target (may include `${prev...}` piping). Defaults to plan target. */
+  target?: string
+  /** Optional `--key value` flag string to forward to the backend. */
+  options?: string
 }
 
 export interface AIScanPlan {
@@ -279,6 +284,62 @@ export function generateScanPlan(target: string, availableTools: HexstrikeTool[]
     recommendations,
     strategy: generateStrategy(targetType, recommendations),
     estimatedTotalTime: totalMinutes < 60 ? `${totalMinutes}m` : `${Math.round(totalMinutes / 60 * 10) / 10}h`,
+  }
+}
+
+/**
+ * LLM-backed planner with heuristic fallback (P3-1).
+ *
+ * If the user has configured an API key, ask the model for a structured
+ * plan (DAG of tool calls). On any failure — no key, network error,
+ * malformed JSON, no model selected — silently fall back to the
+ * deterministic heuristic in `generateScanPlan`. The caller never has
+ * to handle errors.
+ */
+export async function generateScanPlanSmart(
+  target: string,
+  availableTools: HexstrikeTool[],
+  settings?: AISettings,
+  signal?: AbortSignal
+): Promise<{ plan: AIScanPlan; llm?: LLMScanPlan }> {
+  const heuristic = generateScanPlan(target, availableTools)
+  if (!settings) return { plan: heuristic }
+  try {
+    const llm = await planWithLLM(settings, target, availableTools, signal)
+    if (!llm || !llm.steps.length) return { plan: heuristic }
+    // Convert the LLM plan into the legacy AIScanPlan shape so existing
+    // UI continues to work, while exposing the richer structure too.
+    const toolByName = new Map(availableTools.map((t) => [t.name, t]))
+    const recommendations: AIRecommendation[] = llm.steps
+      .map((s, i) => {
+        const tool = toolByName.get(s.tool)
+        if (!tool) return null
+        const dependsOn = s.dependsOn?.map((d) => `step-${d}`)
+        return {
+          tool,
+          reason: s.reason || `Step ${i + 1} of LLM-generated plan`,
+          priority: i < 3 ? 'high' : i < 6 ? 'medium' : 'low',
+          estimatedTime: '2-5 min',
+          dependsOn,
+          // Preserve the per-step target (may contain `${prev...}` piping)
+          // and options string so the autonomous executor can run the DAG
+          // the model actually planned, not just the tool ordering.
+          target: s.target,
+          options: s.options,
+        } as AIRecommendation
+      })
+      .filter((r): r is AIRecommendation => r !== null)
+    if (!recommendations.length) return { plan: heuristic }
+    return {
+      plan: {
+        ...heuristic,
+        recommendations,
+        strategy: llm.strategy || heuristic.strategy,
+      },
+      llm,
+    }
+  } catch {
+    return { plan: heuristic }
   }
 }
 

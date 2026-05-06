@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import rehypeSanitize from 'rehype-sanitize'
 import {
   Send,
   Trash2,
@@ -169,7 +170,7 @@ function MessageBubble({ message }: { message: Message }) {
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : (
             <div className="prose-hex">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{message.content}</ReactMarkdown>
             </div>
           )}
 
@@ -271,7 +272,7 @@ function isTaskComplete(content: string): boolean {
 }
 
 export function ChatPage() {
-  const { settings, activeTools, saveCurrentChat, setCurrentChatId } = useApp()
+  const { settings, activeTools, saveCurrentChat, setCurrentChatId, addSessionUsage } = useApp()
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
@@ -342,7 +343,8 @@ export function ChatPage() {
 
   const runAssistantTurn = useCallback(async (
     currentMessages: Message[],
-    iteration: number
+    iteration: number,
+    signal?: AbortSignal
   ): Promise<{ messages: Message[], shouldContinue: boolean, lastContent: string }> => {
     const assistantId = `assistant-${Date.now()}-${iteration}`
     const assistantMsg: Message = {
@@ -368,7 +370,7 @@ export function ChatPage() {
     } : settings
 
     try {
-      const gen = streamChat(autoSettings, currentMessages, activeTools)
+    const gen = streamChat(autoSettings, currentMessages, activeTools, signal)
 
       for await (const event of gen) {
         if (aborted) break
@@ -423,6 +425,8 @@ export function ChatPage() {
             )
           )
           return { messages: updatedMessages, shouldContinue: false, lastContent: lastContent + `\n\n**Error:** ${event.error}` }
+        } else if (event.type === 'usage') {
+          addSessionUsage(event.usage)
         } else if (event.type === 'done') {
           break
         }
@@ -454,19 +458,20 @@ export function ChatPage() {
       )
       return { messages: updatedMessages, shouldContinue: false, lastContent: errorMsg }
     }
-  }, [settings, activeTools, autoComplete])
+  }, [settings, activeTools, autoComplete, addSessionUsage])
 
-  const handleSubmit = useCallback(async () => {
-    const content = input.trim()
-    if ((!content && attachments.length === 0) || isStreaming) return
+  const handleSubmit = useCallback(async (override?: { content?: string; attachments?: UploadedFile[] }) => {
+    const content = (override?.content ?? input).trim()
+    const sendAttachments = override?.attachments ?? attachments
+    if ((!content && sendAttachments.length === 0) || isStreaming) return
 
     setInput('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
     // Build message content with file info
     let messageContent = content
-    if (attachments.length > 0) {
-      const fileInfo = attachments.map((f) => `- ${f.name} (${f.category}, ${(f.size / 1024).toFixed(1)} KB)`).join('\n')
+    if (sendAttachments.length > 0) {
+      const fileInfo = sendAttachments.map((f) => `- ${f.name} (${f.category}, ${(f.size / 1024).toFixed(1)} KB)`).join('\n')
       messageContent = content ? `${content}\n\n**Attached files:**\n${fileInfo}` : `**Attached files for analysis:**\n${fileInfo}`
     }
 
@@ -475,12 +480,12 @@ export function ChatPage() {
       role: 'user',
       content: messageContent,
       timestamp: Date.now(),
-      toolCalls: attachments.length > 0 ? [{
+      toolCalls: sendAttachments.length > 0 ? [{
         id: `file-attach-${Date.now()}`,
         name: 'file_attach',
-        arguments: { files: attachments.map((f) => ({ id: f.id, name: f.name, category: f.category, data: f.data })) },
+        arguments: { files: sendAttachments.map((f) => ({ id: f.id, name: f.name, category: f.category, data: f.data })) },
         status: 'done',
-        result: `Attached ${attachments.length} file(s) for analysis`,
+        result: `Attached ${sendAttachments.length} file(s) for analysis`,
       }] : undefined,
     }
 
@@ -489,8 +494,25 @@ export function ChatPage() {
     setIsStreaming(true)
     setAutoIteration(0)
 
+    // AbortController forwards Stop both to in-flight `fetch()` (LLM stream)
+    // and to a best-effort backend cancel POST (P3-7).
+    const controller = new AbortController()
     let aborted = false
-    abortRef.current = () => { aborted = true }
+    abortRef.current = () => {
+      aborted = true
+      controller.abort()
+      // Best-effort: tell the backend to cancel any running scans for this
+      // session. If the endpoint doesn't exist (most won't), the catch is
+      // silent — there's nothing useful we can do for the user about it.
+      try {
+        const url = settings.hexstrikeUrl?.replace(/\/+$/, '') + '/api/v1/cancel'
+        void fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'user_stop' }),
+        }).catch(() => undefined)
+      } catch { /* ignore */ }
+    }
 
     let currentMessages = [...messages, userMsg]
     let iteration = 0
@@ -500,7 +522,7 @@ export function ChatPage() {
       while (!aborted && iteration < MAX_AUTO_ITERATIONS) {
         setAutoIteration(iteration + 1)
 
-        const result = await runAssistantTurn(currentMessages, iteration)
+        const result = await runAssistantTurn(currentMessages, iteration, controller.signal)
         currentMessages = result.messages
 
         if (!result.shouldContinue) {
@@ -587,6 +609,42 @@ export function ChatPage() {
 
   const lastMsg = messages[messages.length - 1]
   const showTyping = isStreaming && lastMsg?.role === 'assistant' && !lastMsg.content && !lastMsg.toolCalls?.length
+  const lastAssistantFailed =
+    !isStreaming &&
+    lastMsg?.role === 'assistant' &&
+    typeof lastMsg.content === 'string' &&
+    lastMsg.content.includes('**Error:**')
+
+  const retryLastTurn = useCallback(() => {
+    // Drop the failed assistant message and re-submit the previous user input.
+    const idx = [...messages].reverse().findIndex((m) => m.role === 'user')
+    if (idx < 0) return
+    const userMsgPos = messages.length - 1 - idx
+    const userMsg = messages[userMsgPos]
+    if (!userMsg) return
+
+    // Recover any attachments the original turn carried so the retry
+    // includes the same files (the assistant just failed to process them).
+    const attachToolCall = (userMsg.toolCalls || []).find((tc: any) => tc?.name === 'file_attach') as any
+    const restoredAttachments: UploadedFile[] = ((attachToolCall?.arguments?.files as any[]) || [])
+      .filter((f: any) => f && typeof f.data === 'string') // can't replay if data was already stripped for storage
+      .map((f: any) => ({
+        id: f.id,
+        name: f.name,
+        size: 0,
+        type: 'unknown',
+        category: f.category,
+        data: f.data,
+      } as UploadedFile))
+
+    // Keep only messages up to (but not including) the failed assistant turn.
+    setMessages(messages.slice(0, userMsgPos))
+    const restoredContent = typeof userMsg.content === 'string' ? userMsg.content : ''
+    // Pass content + attachments explicitly so we don't depend on the
+    // post-setState input/attachments state (which is async).
+    void handleSubmit({ content: restoredContent, attachments: restoredAttachments })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, handleSubmit])
 
   return (
     <div className="flex flex-col h-full">
@@ -686,6 +744,17 @@ export function ChatPage() {
                 />
               </div>
             )}
+            {lastAssistantFailed && (
+              <div className="flex justify-start mb-4">
+                <button
+                  onClick={retryLastTurn}
+                  className="flex items-center gap-2 px-3 py-2 text-xs font-medium rounded border border-[#e63946]/40 text-[#e63946] hover:bg-[#e63946]/10 transition-colors"
+                >
+                  <Loader2 size={12} />
+                  Retry last message
+                </button>
+              </div>
+            )}
             <div ref={bottomRef} />
           </div>
         )}
@@ -740,7 +809,7 @@ export function ChatPage() {
               disabled={isStreaming}
             />
             <button
-              onClick={handleSubmit}
+              onClick={() => handleSubmit()}
               disabled={(!input.trim() && attachments.length === 0) || isStreaming}
               className="shrink-0 h-12 w-12 flex items-center justify-center rounded-lg bg-[#e63946] hover:bg-[#c1121f] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               title={isStreaming ? 'Processing...' : attachments.length > 0 && !input.trim() ? 'Send files' : 'Send message'}
