@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import rehypeSanitize from 'rehype-sanitize'
 import {
   Send,
   Trash2,
@@ -169,7 +170,7 @@ function MessageBubble({ message }: { message: Message }) {
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : (
             <div className="prose-hex">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{message.content}</ReactMarkdown>
             </div>
           )}
 
@@ -587,6 +588,26 @@ export function ChatPage() {
 
   const lastMsg = messages[messages.length - 1]
   const showTyping = isStreaming && lastMsg?.role === 'assistant' && !lastMsg.content && !lastMsg.toolCalls?.length
+  const lastAssistantFailed =
+    !isStreaming &&
+    lastMsg?.role === 'assistant' &&
+    typeof lastMsg.content === 'string' &&
+    lastMsg.content.includes('**Error:**')
+
+  const retryLastTurn = useCallback(() => {
+    // Drop the failed assistant message and re-submit the previous user input.
+    const idx = [...messages].reverse().findIndex((m) => m.role === 'user')
+    if (idx < 0) return
+    const userMsgPos = messages.length - 1 - idx
+    const userMsg = messages[userMsgPos]
+    if (!userMsg) return
+    // Keep only messages up to (but not including) the failed assistant turn.
+    setMessages(messages.slice(0, userMsgPos))
+    setInput(typeof userMsg.content === 'string' ? userMsg.content : '')
+    // Defer submit so state settles.
+    setTimeout(() => { void handleSubmit() }, 0)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages])
 
   return (
     <div className="flex flex-col h-full">
@@ -684,6 +705,17 @@ export function ChatPage() {
                   maxIteration={MAX_AUTO_ITERATIONS}
                   status={autoStatus}
                 />
+              </div>
+            )}
+            {lastAssistantFailed && (
+              <div className="flex justify-start mb-4">
+                <button
+                  onClick={retryLastTurn}
+                  className="flex items-center gap-2 px-3 py-2 text-xs font-medium rounded border border-[#e63946]/40 text-[#e63946] hover:bg-[#e63946]/10 transition-colors"
+                >
+                  <Loader2 size={12} />
+                  Retry last message
+                </button>
               </div>
             )}
             <div ref={bottomRef} />
