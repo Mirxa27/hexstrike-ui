@@ -1,3 +1,4 @@
+/* eslint-disable no-shadow-restricted-names */
 import { useState, useRef, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -359,7 +360,7 @@ export function ChatPage() {
     const updatedMessages = [...currentMessages, assistantMsg]
     setMessages(updatedMessages)
 
-    let aborted = false
+    const aborted = false
     let lastContent = ''
     const toolCallMap: Record<string, ToolCall> = {}
 
@@ -643,7 +644,7 @@ export function ChatPage() {
     // Pass content + attachments explicitly so we don't depend on the
     // post-setState input/attachments state (which is async).
     void handleSubmit({ content: restoredContent, attachments: restoredAttachments })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [messages, handleSubmit])
 
   return (
