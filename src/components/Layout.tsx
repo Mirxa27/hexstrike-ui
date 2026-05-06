@@ -23,6 +23,12 @@ import {
   Upload,
 } from 'lucide-react'
 import { useApp } from '../AppContext'
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
 import { ChatHistorySidebar } from './ChatHistory'
 import { WorkspacePanel } from './WorkspacePanel'
 import { AutonomousWorkspace } from './AutonomousWorkspace'
@@ -79,6 +85,8 @@ export function Layout() {
     setSidebarOpen,
     activeWorkspace,
     setActiveWorkspace,
+    sessionUsage,
+    resetSessionUsage,
   } = useApp()
   const isSettingsPage = location.pathname === '/settings'
 
@@ -158,6 +166,19 @@ export function Layout() {
           >
             <History size={14} />
           </button>
+
+          {/* Token usage meter (P3-9) — clicking resets the per-session counter */}
+          {(sessionUsage.in > 0 || sessionUsage.out > 0) && (
+            <button
+              onClick={resetSessionUsage}
+              className="ml-2 flex items-center gap-1 text-[10px] font-mono text-[#6b7280] hover:text-[#e2e8f0] px-2 py-1 border border-[#1a1a2e] rounded"
+              title={`Click to reset. Session: ${sessionUsage.in} in / ${sessionUsage.out} out tokens`}
+            >
+              <span className="text-[#00d4ff]">↑{formatTokenCount(sessionUsage.in)}</span>
+              <span className="text-[#94a3b8]">/</span>
+              <span className="text-[#00ff41]">↓{formatTokenCount(sessionUsage.out)}</span>
+            </button>
+          )}
 
           {/* Settings */}
           <NavLink

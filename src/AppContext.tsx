@@ -43,6 +43,10 @@ interface AppContextValue {
   recentTools: string[]
   addRecentTool: (toolName: string) => void
   quickActions: QuickAction[]
+  // Token usage meter (P3-9)
+  sessionUsage: { in: number; out: number }
+  addSessionUsage: (delta: { in?: number; out?: number }) => void
+  resetSessionUsage: () => void
 }
 
 const QUICK_ACTIONS: QuickAction[] = [
@@ -75,6 +79,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceType>('chat')
   const [workspaceExecutions, setWorkspaceExecutions] = useState<ToolExecution[]>([])
   const [recentTools, setRecentTools] = useState<string[]>([])
+  // Per-session token usage (P3-9). Reset whenever the user starts a new chat.
+  const [sessionUsage, setSessionUsage] = useState<{ in: number; out: number }>({ in: 0, out: 0 })
+  const addSessionUsage = useCallback((delta: { in?: number; out?: number }) => {
+    setSessionUsage((prev) => ({
+      in: prev.in + (delta.in || 0),
+      out: prev.out + (delta.out || 0),
+    }))
+  }, [])
+  const resetSessionUsage = useCallback(() => setSessionUsage({ in: 0, out: 0 }), [])
 
   // Track previous connection state so we only toast on state transitions.
   const wasConnectedRef = useRef<boolean | null>(null)
@@ -258,6 +271,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         recentTools,
         addRecentTool,
         quickActions: QUICK_ACTIONS,
+        sessionUsage,
+        addSessionUsage,
+        resetSessionUsage,
       }}
     >
       {children}

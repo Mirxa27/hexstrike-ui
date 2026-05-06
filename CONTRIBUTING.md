@@ -55,7 +55,17 @@ npm run build
 
 # Preview production build
 npm run preview
+
+# Type-check without emitting (fast)
+npm run typecheck
+
+# Run the unit test suite (Vitest)
+npm test          # one-shot, used by CI
+npm run test:watch  # interactive watcher
 ```
+
+> Before opening a PR please run **`npm run typecheck`**, **`npm test`**, and
+> **`npm run lint`** locally — CI runs the same trio against `npm ci`.
 
 ### Project Structure
 

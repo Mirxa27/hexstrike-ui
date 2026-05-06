@@ -272,7 +272,7 @@ function isTaskComplete(content: string): boolean {
 }
 
 export function ChatPage() {
-  const { settings, activeTools, saveCurrentChat, setCurrentChatId } = useApp()
+  const { settings, activeTools, saveCurrentChat, setCurrentChatId, addSessionUsage } = useApp()
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
@@ -343,7 +343,8 @@ export function ChatPage() {
 
   const runAssistantTurn = useCallback(async (
     currentMessages: Message[],
-    iteration: number
+    iteration: number,
+    signal?: AbortSignal
   ): Promise<{ messages: Message[], shouldContinue: boolean, lastContent: string }> => {
     const assistantId = `assistant-${Date.now()}-${iteration}`
     const assistantMsg: Message = {
@@ -369,7 +370,7 @@ export function ChatPage() {
     } : settings
 
     try {
-      const gen = streamChat(autoSettings, currentMessages, activeTools)
+    const gen = streamChat(autoSettings, currentMessages, activeTools, signal)
 
       for await (const event of gen) {
         if (aborted) break
@@ -424,6 +425,8 @@ export function ChatPage() {
             )
           )
           return { messages: updatedMessages, shouldContinue: false, lastContent: lastContent + `\n\n**Error:** ${event.error}` }
+        } else if (event.type === 'usage') {
+          addSessionUsage(event.usage)
         } else if (event.type === 'done') {
           break
         }
@@ -455,7 +458,7 @@ export function ChatPage() {
       )
       return { messages: updatedMessages, shouldContinue: false, lastContent: errorMsg }
     }
-  }, [settings, activeTools, autoComplete])
+  }, [settings, activeTools, autoComplete, addSessionUsage])
 
   const handleSubmit = useCallback(async () => {
     const content = input.trim()
@@ -490,8 +493,25 @@ export function ChatPage() {
     setIsStreaming(true)
     setAutoIteration(0)
 
+    // AbortController forwards Stop both to in-flight `fetch()` (LLM stream)
+    // and to a best-effort backend cancel POST (P3-7).
+    const controller = new AbortController()
     let aborted = false
-    abortRef.current = () => { aborted = true }
+    abortRef.current = () => {
+      aborted = true
+      controller.abort()
+      // Best-effort: tell the backend to cancel any running scans for this
+      // session. If the endpoint doesn't exist (most won't), the catch is
+      // silent — there's nothing useful we can do for the user about it.
+      try {
+        const url = settings.hexstrikeUrl?.replace(/\/+$/, '') + '/api/v1/cancel'
+        void fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'user_stop' }),
+        }).catch(() => undefined)
+      } catch { /* ignore */ }
+    }
 
     let currentMessages = [...messages, userMsg]
     let iteration = 0
@@ -501,7 +521,7 @@ export function ChatPage() {
       while (!aborted && iteration < MAX_AUTO_ITERATIONS) {
         setAutoIteration(iteration + 1)
 
-        const result = await runAssistantTurn(currentMessages, iteration)
+        const result = await runAssistantTurn(currentMessages, iteration, controller.signal)
         currentMessages = result.messages
 
         if (!result.shouldContinue) {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   Play,
   Pause,
@@ -21,7 +21,8 @@ import {
 import type { ToolExecution, HexstrikeTool, OSINTReport } from '../types'
 import { useApp } from '../AppContext'
 import { executeHexstrikeTool } from '../api'
-import { generateScanPlan, detectTargetType, analyzeResults, type AIScanPlan } from '../aiAgent'
+import { generateScanPlanSmart, detectTargetType, analyzeResults, type AIScanPlan } from '../aiAgent'
+import { entitiesByTool, substituteVariables, FailureTracker } from '../agent'
 import { generateOSINTReport, generateNarrativeReport } from '../reportGenerator'
 
 interface AutonomousWorkspaceProps {
@@ -30,7 +31,7 @@ interface AutonomousWorkspaceProps {
 }
 
 export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspaceProps) {
-  const { addWorkspaceExecution, addRecentTool, hexstrikeLoading, hexstrikeConnected } = useApp()
+  const { addWorkspaceExecution, addRecentTool, hexstrikeLoading, hexstrikeConnected, settings } = useApp()
 
   const [target, setTarget] = useState('')
   const [isRunning, setIsRunning] = useState(false)
@@ -43,15 +44,21 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
   const [analysis, setAnalysis] = useState<any>(null)
   const [showNarrative, setShowNarrative] = useState(false)
 
-  // Generate scan plan when target changes
+  // Persistent failure tracker across the scan run (P3-10).
+  const failureTrackerRef = useRef(new FailureTracker())
+
+  // Generate scan plan when target changes (LLM-backed when possible, P3-1)
   useEffect(() => {
     if (target.length > 3) {
-      const plan = generateScanPlan(target, tools)
-      setScanPlan(plan)
+      let cancelled = false
+      void generateScanPlanSmart(target, tools, settings).then(({ plan }) => {
+        if (!cancelled) setScanPlan(plan)
+      })
+      return () => { cancelled = true }
     } else {
       setScanPlan(null)
     }
-  }, [target, tools])
+  }, [target, tools, settings])
 
   // Auto-execute logic
   useEffect(() => {
@@ -63,18 +70,45 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
       const recommendation = scanPlan.recommendations[currentStep]
       if (!recommendation) return
 
+      // Backoff guard: skip tools that have failed too many times (P3-10).
+      if (failureTrackerRef.current.shouldSkip(recommendation.tool.name)) {
+        setCompletedExecutions((prev) => [
+          ...prev,
+          {
+            id: `auto-${Date.now()}`,
+            toolName: recommendation.tool.name,
+            target,
+            status: 'error',
+            result: `Skipped after repeated failures (backoff)`,
+            timestamp: Date.now(),
+          },
+        ])
+        setCurrentStep((prev) => prev + 1)
+        return
+      }
+
+      // Inter-step variable piping (P3-3): the recommendation may use
+      // `${prev.<tool>.<field>}` references in its target/options string,
+      // resolved against entities extracted from earlier executions.
+      const ctx = {
+        prev: entitiesByTool(completedExecutions),
+        entities: { domains: [], subdomains: [], ips: [], urls: [], emails: [], cves: [], hashes: [], ports: [] },
+      }
+      const targetRes = substituteVariables(target, ctx)
+      const resolvedTarget = targetRes.value || target
+
       try {
         const result = await executeHexstrikeTool(
-          'http://localhost:8888',
+          settings.hexstrikeUrl || 'http://localhost:8888',
           recommendation.tool.name,
-          target,
+          resolvedTarget,
           { raw: '' }
         )
 
         const execution: ToolExecution = {
           id: `auto-${Date.now()}`,
           toolName: recommendation.tool.name,
-          target,
+          target: resolvedTarget,
           status: 'done',
           result: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
           timestamp: Date.now(),
@@ -83,14 +117,16 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
         setCompletedExecutions(prev => [...prev, execution])
         addWorkspaceExecution(execution)
         addRecentTool(recommendation.tool.name)
+        failureTrackerRef.current.reset(recommendation.tool.name)
 
         // Move to next step
         setCurrentStep(prev => prev + 1)
       } catch (err: any) {
+        failureTrackerRef.current.record(recommendation.tool.name)
         const execution: ToolExecution = {
           id: `auto-${Date.now()}`,
           toolName: recommendation.tool.name,
-          target,
+          target: resolvedTarget,
           status: 'error',
           result: `Error: ${err?.message ?? String(err)}`,
           timestamp: Date.now(),
@@ -102,6 +138,7 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
     }
 
     executeNext()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRunning, isPaused, currentStep, scanPlan, target])
 
   // Generate analysis when execution completes
