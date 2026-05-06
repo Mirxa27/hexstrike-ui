@@ -1,53 +1,82 @@
-version: '3.8'
+# HexStrike UI - Docker Compose
+#
+# Default profile (no flag) starts only the frontend:
+#     docker compose up -d                  # frontend only
+#
+# To also run the optional HexStrike backend (you must have an image
+# named ${HEXSTRIKE_BACKEND_IMAGE} or use `--profile backend` plus a
+# pre-built image in your registry):
+#     docker compose --profile backend up -d
+#
+# See `start.sh` / `start.bat` for friendlier wrappers.
 
 services:
-  # HexStrike UI Frontend
+  # ─── HexStrike UI Frontend ─────────────────────────────────────────────
   frontend:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Build-time backend URL used by the nginx reverse proxy at /api/.
+        # Override with `BACKEND_URL=http://my-backend:8888 docker compose build`.
+        BACKEND_URL: ${BACKEND_URL:-http://hexstrike-backend:8888}
+    image: hexstrike-ui:latest
     container_name: hexstrike-ui
     ports:
-      - "4173:8080"
+      - "${FRONTEND_PORT:-4173}:8080"
     environment:
       - NODE_ENV=production
     restart: unless-stopped
     networks:
       - hexstrike-network
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx:size=64M,mode=0755,uid=1001,gid=1001
+      - /var/run:size=8M,mode=0755,uid=1001,gid=1001
+      - /tmp:size=16M,mode=1777
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 5s
 
-  # HexStrike Backend (if you have it)
+  # ─── Optional HexStrike Backend ────────────────────────────────────────
+  # Gated behind the "backend" compose profile so the default `up` works
+  # cleanly even when you don't have a backend image available locally.
   backend:
-    image: hexstrike-backend:latest
+    profiles: ["backend"]
+    image: ${HEXSTRIKE_BACKEND_IMAGE:-hexstrike-backend:latest}
     container_name: hexstrike-backend
     ports:
-      - "8888:8888"
+      - "${BACKEND_PORT:-8888}:8888"
     volumes:
-      - ./data:/app/data
-      - ./output:/app/output
+      - hexstrike-data:/app/data
+      - hexstrike-output:/app/output
     environment:
       - HEXSTRIKE_HOST=0.0.0.0
       - HEXSTRIKE_PORT=8888
-      - HEXSTRIKE_LOG_LEVEL=info
+      - HEXSTRIKE_LOG_LEVEL=${HEXSTRIKE_LOG_LEVEL:-info}
     restart: unless-stopped
     networks:
       - hexstrike-network
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8888/health || curl -fsS http://localhost:8888/api/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
 networks:
   hexstrike-network:
     driver: bridge
 
 volumes:
-  data:
-  output:
+  hexstrike-data:
+  hexstrike-output:

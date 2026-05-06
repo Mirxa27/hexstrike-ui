@@ -161,9 +161,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       id: `exec-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       timestamp: Date.now(),
     }
-    setWorkspaceExecutions((prev) => [...prev, newExec])
-    // Keep only last 50 executions
-    setWorkspaceExecutions((prev) => prev.slice(-50))
+    // Single setter that both appends and trims to the most recent 50.
+    // The previous implementation called setWorkspaceExecutions twice —
+    // under React 18+ batching, the second call's `prev` could be the
+    // *pre-append* array, silently dropping the new exec.
+    setWorkspaceExecutions((prev) => {
+      const merged = [...prev, newExec]
+      return merged.length > 50 ? merged.slice(-50) : merged
+    })
   }, [])
 
   const clearWorkspaceExecutions = useCallback(() => {

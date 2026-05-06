@@ -4,6 +4,14 @@ import type { AISettings } from './types'
 
 const STORAGE_KEY = 'hexstrike-settings'
 
+// Build-time defaults from `.env` / Vite's `import.meta.env`. These are
+// only used the very first time the app loads (before the user opens
+// Settings). Once the user saves anything, `localStorage` wins.
+const ENV_HEXSTRIKE_URL =
+  (import.meta.env?.VITE_HEXSTRIKE_URL as string | undefined) ||
+  (import.meta.env?.VITE_API_BASE_URL as string | undefined) ||
+  'http://localhost:8888'
+
 // Context window sizes for different providers/models
 const DEFAULT_CONTEXT_WINDOWS: Record<string, number> = {
   // OpenAI
@@ -120,10 +128,10 @@ When in AUTO-COMPLETE MODE:
 - Suggest manual validation steps
 
 Remember: You are the operator's intelligent assistant. Use tools efficiently, think like a security professional, and help achieve objectives systematically.`,
-  hexstrikeUrl: 'http://localhost:8888',
+  hexstrikeUrl: ENV_HEXSTRIKE_URL,
 }
 
-function getContextWindowForModel(model: string): number {
+export function getContextWindowForModel(model: string): number {
   if (!model) return 128000
   // Exact match
   if (model.toLowerCase() in DEFAULT_CONTEXT_WINDOWS) {

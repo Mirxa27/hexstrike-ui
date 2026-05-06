@@ -164,7 +164,11 @@ export function createChatHistoryStore(): ChatHistoryStore {
   loadSessions()
 
   return {
-    sessions,
+    // `sessions` previously captured the array reference at construction
+    // time, so any subsequent reassignment inside the closure (load,
+    // import, clear, delete) would leave callers reading a stale list.
+    // Use a getter so each access returns the live in-memory list.
+    get sessions() { return sessions },
     get currentSessionId() { return currentSessionId },
     set currentSessionId(id: string | null) { currentSessionId = id },
     loadSessions,
