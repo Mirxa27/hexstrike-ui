@@ -124,6 +124,51 @@ npm run build
 npm run lint
 ```
 
+## 🆓 Run HexStrike 100% free
+
+HexStrike runs end-to-end at **$0** — no API keys, no accounts, no cloud bills. A bundled local LLM does the reasoning, and the entire OSINT/recon/forensics toolset is free and self-contained. The single honest exception is **web-wide automated face search** (covered below). Everything else works offline or against free public services.
+
+### Free LLM brain
+
+The recommended path is the **bundled Ollama** service:
+
+```bash
+docker compose --profile llm up -d
+```
+
+This auto-pulls a default model (`qwen2.5:1.5b`), enables CORS, and serves at `http://localhost:11434`. Then in the app:
+
+> **Settings → Provider: Ollama → Fetch models → Save Settings**
+
+No key required, fully offline. Bump quality with `OLLAMA_MODEL=qwen2.5:3b` (or `llama3.2:3b`) in `.env`.
+
+**Other free options:**
+
+- **LM Studio (local)** — Download from [lmstudio.ai](https://lmstudio.ai), start the server (enable CORS), then set **Provider: LM Studio**, Base URL `http://localhost:1234` (`/v1` is auto-appended), and Fetch. No key required.
+- **Free cloud tiers** — Get a free key and select the matching provider:
+  - **Groq** — [console.groq.com/keys](https://console.groq.com/keys) (fast, generous free tier)
+  - **Google Gemini** — [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (generous free tier)
+  - **OpenRouter** — via **Provider: Custom**, Base URL `https://openrouter.ai/api/v1`, with a free key for its free models
+
+### Free tools
+
+**43 of 44 bundled tools** run without an API key. The recon, OSINT, and forensics stack is keyless and self-contained — ideal for offline or restricted environments:
+
+- **OSINT / recon** — `sherlock`, `holehe`, `ghunt`, `dnstwist`, `httpx`, `nuclei`, `nmap`, `gau`, `waybackurls`, `whois`, `dig`
+- **Forensics** — `exiftool`, `binwalk`, `steghide`, `foremost`, `strings`, `file`, `tcpdump`
+
+A handful accept **optional, free API keys** purely to widen coverage — they still work fully without them: `maigret`, and `subfinder`/`amass` (optional free Shodan/Censys keys increase subdomain coverage).
+
+### Free face / person / image OSINT
+
+Local face work and people-search are completely free:
+
+- **Local face recognition** (`face_recognition` / dlib) — detect, count, and locate faces, extract 128-dimensional embeddings, and compare two images to decide if they show the same person. 100% offline, zero API calls, no credentials. Via `osint-image-search face-detect|face-encode|face-compare`.
+- **People / username search** — `sherlock`, `maigret`, `holehe`, and `social-analyzer` enumerate public profiles across hundreds of platforms for free.
+- **Reverse-image search** — `osint-image-search reverse <url>` generates direct upload URLs for **Google Lens, Yandex, Bing, and TinEye**. Opening them and uploading is free; they return where an image appears online.
+
+**The one paid boundary:** *web-wide automated face search* — uploading a face and auto-crawling the internet for matches — is only offered by **[PimEyes](https://pimeyes.com/en)** and **[FaceCheck.id](https://facecheck.id/)**, both of which require an account and paid credits. HexStrike only generates the upload links; it does not scrape these services. There is no genuinely free alternative at that scale, and we won't pretend otherwise.
+
 ## 🛠 Troubleshooting
 
 **Frontend loads but tools fail with "Backend unreachable"**
