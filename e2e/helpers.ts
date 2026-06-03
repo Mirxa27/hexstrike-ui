@@ -104,6 +104,26 @@ export async function mockOpenAIChat(page: Page, reply: string): Promise<void> {
   )
 }
 
+/**
+ * Mock LM Studio's chat endpoint at the canonical `/v1` path. The route URL is
+ * exact, so it only matches if the app correctly appended `/v1` to a bare
+ * `http://localhost:1234` base — proving the LM Studio base-URL normalization.
+ */
+export async function mockLmStudioChat(page: Page, reply: string): Promise<void> {
+  await page.route('http://localhost:1234/v1/chat/completions', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      headers: { 'cache-control': 'no-cache' },
+      body: openAISSE([reply.slice(0, Math.ceil(reply.length / 2)), reply.slice(Math.ceil(reply.length / 2))]),
+    })
+  )
+  // /v1/models so a Settings "Fetch" would also resolve correctly.
+  await page.route('http://localhost:1234/v1/models', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [{ id: 'local-model' }] }) })
+  )
+}
+
 /** Mock OpenAI /models for the Settings "Fetch models" flow. */
 export async function mockOpenAIModels(page: Page, models: string[] = ['gpt-4o', 'gpt-4o-mini', 'o1']): Promise<void> {
   await page.route('https://api.openai.com/v1/models', (route) =>

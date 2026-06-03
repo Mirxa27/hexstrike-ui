@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { seedSettings, mockBackendHealthy, mockOpenAIChat } from './helpers'
+import { seedSettings, mockBackendHealthy, mockOpenAIChat, mockLmStudioChat } from './helpers'
 
 test.describe('Chat flow (mocked LLM)', () => {
   test('sends a message and renders the streamed assistant reply', async ({ page }) => {
@@ -39,6 +39,28 @@ test.describe('Chat flow (mocked LLM)', () => {
     // The error renders in the transcript (scope to <main>; the specific text
     // avoids strict-mode collisions with the composer's "Configure a model" hint).
     await expect(page.getByRole('main').getByText(/No model selected/i)).toBeVisible()
+  })
+
+  test('LM Studio: a bare host URL (no /v1) still chats — /v1 is auto-added', async ({ page }) => {
+    // The user pastes the address LM Studio shows them: no /v1.
+    await seedSettings(page, {
+      provider: 'lmstudio',
+      baseUrl: 'http://localhost:1234',
+      model: 'local-model',
+      apiKey: '',
+      autocomplete: false,
+    })
+    await mockBackendHealthy(page)
+    // Mock ONLY the correct /v1 path — if the app failed to normalize, the
+    // request would hit /chat/completions (unmocked) and no reply would render.
+    await mockLmStudioChat(page, 'Local model reply: recon queued on the target.')
+
+    await page.goto('/')
+    const input = page.getByPlaceholder('Message HexStrike…')
+    await input.fill('hello local model')
+    await input.press('Enter')
+
+    await expect(page.getByRole('main').getByText('Local model reply: recon queued on the target.')).toBeVisible({ timeout: 15_000 })
   })
 
   test('example prompt populates the composer', async ({ page }) => {

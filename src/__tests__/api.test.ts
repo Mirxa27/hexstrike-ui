@@ -13,7 +13,30 @@ import {
   buildPackageInstallCommand,
   hexstrikeToolTriggersCatalogRefresh,
   hexstrikeV6UsesDomainField,
+  ensureLmStudioApiBase,
 } from '../api'
+
+describe('ensureLmStudioApiBase', () => {
+  it('appends /v1 to a bare LM Studio host (the common paste case)', () => {
+    expect(ensureLmStudioApiBase('http://localhost:1234')).toBe('http://localhost:1234/v1')
+  })
+  it('strips trailing slashes before appending /v1', () => {
+    expect(ensureLmStudioApiBase('http://localhost:1234/')).toBe('http://localhost:1234/v1')
+  })
+  it('leaves an existing /v1 suffix untouched', () => {
+    expect(ensureLmStudioApiBase('http://localhost:1234/v1')).toBe('http://localhost:1234/v1')
+  })
+  it('preserves any /vN version suffix', () => {
+    expect(ensureLmStudioApiBase('http://host:5000/v2')).toBe('http://host:5000/v2')
+  })
+  it('falls back to the LM Studio default when empty', () => {
+    expect(ensureLmStudioApiBase('')).toBe('http://localhost:1234/v1')
+    expect(ensureLmStudioApiBase(undefined)).toBe('http://localhost:1234/v1')
+  })
+  it('handles a custom host:port without scheme munging', () => {
+    expect(ensureLmStudioApiBase('http://192.168.1.50:1234')).toBe('http://192.168.1.50:1234/v1')
+  })
+})
 
 describe('validateTarget', () => {
   it('accepts a normal domain', () => {

@@ -312,9 +312,9 @@ export function SettingsPage() {
                 label="Base URL"
                 hint={
                   draft.provider === Provider.ollama
-                    ? 'Default: http://localhost:11434'
+                    ? 'Default: http://localhost:11434 — run `ollama serve` first.'
                     : draft.provider === Provider.lmstudio
-                    ? 'Default: http://localhost:1234/v1'
+                    ? 'Paste the LM Studio server address (e.g. http://localhost:1234) — /v1 is added automatically. Start it via Developer → Start Server, load a model, and enable CORS.'
                     : 'Full base URL for your API endpoint'
                 }
               >

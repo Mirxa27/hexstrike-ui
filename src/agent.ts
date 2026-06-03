@@ -11,6 +11,7 @@
 
 import type { AISettings, HexstrikeTool, ToolExecution } from './types'
 import { Provider } from './types'
+import { ensureLmStudioApiBase } from './api'
 
 // ─── Reasoning-model detection (P3-8) ──────────────────────────────────────
 
@@ -395,7 +396,9 @@ async function singleShotCompletion(
   }
 
   // OpenAI-compatible
-  const base = (settings.baseUrl || defaultBaseFor(provider)).replace(/\/+$/, '')
+  const base = provider === Provider.lmstudio
+    ? ensureLmStudioApiBase(settings.baseUrl)
+    : (settings.baseUrl || defaultBaseFor(provider)).replace(/\/+$/, '')
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (settings.apiKey) headers['Authorization'] = `Bearer ${settings.apiKey}`
   const body: Record<string, unknown> = {

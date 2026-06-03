@@ -1,6 +1,6 @@
 import { Provider } from './types'
 import type { AISettings, HexstrikeTool, Message, ToolCall } from './types'
-import { executeHexstrikeTool } from './api'
+import { executeHexstrikeTool, ensureLmStudioApiBase } from './api'
 import {
   truncateForBudget,
   isReasoningModel,
@@ -113,6 +113,9 @@ const DEFAULT_BASE: Record<string, string> = {
 }
 
 function resolveBase(settings: AISettings): string {
+  // LM Studio: guarantee the `/v1` suffix so chat/completions resolves even
+  // when the user pasted a bare `http://localhost:1234` from the LM Studio UI.
+  if (settings.provider === Provider.lmstudio) return ensureLmStudioApiBase(settings.baseUrl)
   return (settings.baseUrl || DEFAULT_BASE[settings.provider] || '').replace(/\/+$/, '')
 }
 
@@ -194,13 +197,20 @@ async function* openAIStream(
       settings.provider === Provider.openai ||
       settings.provider === Provider.groq ||
       settings.provider === Provider.mistral ||
-      settings.provider === Provider.custom
+      settings.provider === Provider.custom ||
+      settings.provider === Provider.lmstudio
     ) {
+      // LM Studio (recent builds) supports usage in the final stream chunk, so
+      // the token meter works for local models too.
       body.stream_options = { include_usage: true }
     }
 
+    // `reasoning_effort` is an OpenAI/cloud concept — local servers (LM Studio,
+    // Ollama) typically reject unknown params, so don't send it there.
     const effort = suggestReasoningEffort(settings)
-    if (effort) body.reasoning_effort = effort
+    if (effort && settings.provider !== Provider.lmstudio && settings.provider !== Provider.ollama) {
+      body.reasoning_effort = effort
+    }
 
     if (withTools && toolDefs?.length) body.tools = toolDefs
 
@@ -667,7 +677,15 @@ export async function* streamChat(
     }
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('ECONNREFUSED')) {
-      yield { type: 'error', error: `Cannot reach ${settings.provider} API. Check your internet connection or base URL in Settings.` }
+      let hint: string
+      if (settings.provider === Provider.lmstudio) {
+        hint = `Cannot reach LM Studio at ${resolveBase(settings)}. Start its server (LM Studio → Developer → Start Server), confirm a model is loaded, and enable CORS in the server settings.`
+      } else if (settings.provider === Provider.ollama) {
+        hint = `Cannot reach Ollama at ${resolveBase(settings)}. Make sure it's running (\`ollama serve\`) and reachable from the browser.`
+      } else {
+        hint = `Cannot reach ${settings.provider} API. Check your internet connection or base URL in Settings.`
+      }
+      yield { type: 'error', error: hint }
     } else {
       yield { type: 'error', error: msg }
     }

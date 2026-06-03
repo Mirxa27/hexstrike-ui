@@ -10,6 +10,24 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   [Provider.ollama]: 'http://localhost:11434',
 }
 
+/**
+ * Resolve an LM Studio base URL to its OpenAI-compatible `/v1` root.
+ *
+ * LM Studio's app shows the server address as `http://localhost:1234` (no
+ * `/v1`), so users routinely paste that. Its OpenAI-compatible endpoints
+ * (`/v1/models`, `/v1/chat/completions`) live under `/v1`. We append it when
+ * missing and apply this uniformly to model listing, chat streaming, AND the
+ * planner — previously "Fetch models" auto-added `/v1` but the chat stream did
+ * not, so a bare host worked for the model list yet silently failed to chat.
+ *
+ * An empty input falls back to the LM Studio default. An existing `/vN`
+ * suffix (any version) is preserved so custom builds aren't clobbered.
+ */
+export function ensureLmStudioApiBase(base: string | undefined | null): string {
+  const b = (base || DEFAULT_BASE_URLS[Provider.lmstudio]).trim().replace(/\/+$/, '')
+  return /\/v\d+$/.test(b) ? b : `${b}/v1`
+}
+
 // ─── Input validation & sanitization ─────────────────────────────────────────
 // All tool invocations go through these guards before being sent to the
 // HexStrike backend. The intent is defence-in-depth — the backend is
@@ -350,18 +368,30 @@ export async function fetchModels(settings: AISettings): Promise<string[]> {
     }
 
     case Provider.lmstudio: {
-      const base = (baseUrl || DEFAULT_BASE_URLS[Provider.lmstudio]).replace(/\/+$/, '')
-      const url = base.endsWith('/v1') ? `${base}/models` : `${base}/v1/models`
-      const res = await fetch(url)
-      if (!res.ok) throw new Error(`LM Studio error: ${res.status} ${res.statusText}`)
+      const base = ensureLmStudioApiBase(baseUrl)
+      let res: Response
+      try {
+        res = await fetch(`${base}/models`)
+      } catch {
+        throw new Error(
+          `Cannot reach LM Studio at ${base}. Start its local server (LM Studio → Developer → Start Server) and enable CORS in the server settings.`
+        )
+      }
+      if (!res.ok) {
+        throw new Error(`LM Studio error: ${res.status} ${res.statusText} (server reachable at ${base}?)`)
+      }
       const data = await res.json() as Record<string, unknown>
-      const rawList = (data.data ?? []) as unknown[]
-      return rawList
+      const rawList = (data.data ?? data.models ?? []) as unknown[]
+      const models = rawList
         .map((m) => {
           const rec = m as Record<string, unknown>
           return (rec.id ?? rec.name) as string | undefined
         })
         .filter(Boolean) as string[]
+      if (!models.length) {
+        throw new Error(`LM Studio is reachable at ${base} but reports no models — load a model in LM Studio first.`)
+      }
+      return models
     }
 
     case Provider.custom: {
