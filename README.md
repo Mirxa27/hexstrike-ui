@@ -64,9 +64,35 @@ Then open your browser and visit: **http://localhost:4173**
 # Frontend only
 docker compose up -d
 
-# Frontend + backend
-docker compose --profile backend up -d
+# Frontend + a lean backend (nmap, whois, dig, exiftool, binwalk, tcpdump, …)
+docker compose --profile backend up -d --build
 ```
+
+### Option 2b: Full toolset + advanced OSINT (face / person search)
+
+For a comprehensive backend (~44 tools out of the box), build the full image and
+point Compose at it:
+
+```bash
+# Build the comprehensive image (large; Go recon suite + people-search + face recognition)
+docker build -f docker/hexstrike-backend.full.Dockerfile -t hexstrike-backend:full .
+
+# Run the stack against it
+HEXSTRIKE_BACKEND_IMAGE=hexstrike-backend:full docker compose --profile backend up -d
+```
+
+This adds:
+
+- **Recon (Go):** subfinder, httpx, nuclei, naabu, dnsx, katana, ffuf, gobuster, assetfinder, gau, waybackurls, dalfox, amass
+- **People search:** sherlock, maigret, holehe, socialscan, social-analyzer, h8mail, ghunt, dnstwist
+- **Face / image OSINT:** local `face_recognition` (dlib) + the `osint-image-search` helper
+  - `osint-image-search face-detect <img>` · `face-compare <a> <b>` · `face-encode <img>`
+  - `osint-image-search reverse <image-url>` → reverse-image search URLs (Google Lens, Yandex, Bing, TinEye, PimEyes/FaceCheck)
+
+> Web-wide automated **face** search engines (PimEyes, FaceCheck) are paid/closed —
+> the helper emits the correct query URLs for them and performs real, offline
+> face detection/matching locally. Use only on subjects/targets you are
+> authorized to investigate.
 
 ### Option 3: Manual Docker Build
 

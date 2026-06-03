@@ -95,6 +95,15 @@ RUN pip install --no-cache-dir social-analyzer || echo "[skip pip] social-analyz
 # ── Local face recognition (dlib). Heavy compile; allowed to skip on failure. ──
 RUN pip install --no-cache-dir face_recognition || echo "[skip pip] face_recognition"
 
+# face_recognition needs (a) its trained model files and (b) `pkg_resources`,
+# which face_recognition_models imports — but setuptools>=81 REMOVED
+# pkg_resources, so pin setuptools<81. Kept as a separate layer so the heavy
+# dlib compile above stays cached on rebuilds.
+RUN pip install --no-cache-dir "setuptools<81" \
+ && ( pip install --no-cache-dir face_recognition_models \
+      || pip install --no-cache-dir "git+https://github.com/ageitgey/face_recognition_models" \
+      || echo "[skip pip] face_recognition_models" )
+
 # ── osint-image-search helper (face detect/encode/compare + reverse-image URLs) ──
 COPY scripts/osint-image-search.py /usr/local/bin/osint-image-search
 RUN chmod +x /usr/local/bin/osint-image-search \
