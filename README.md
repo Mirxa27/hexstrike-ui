@@ -40,13 +40,23 @@ start.bat up --with-backend
 
 Then open your browser and visit: **http://localhost:4173**
 
-> ⚠️ The HexStrike backend container is **optional** and lives in a separate
-> repository — it's gated behind a Compose `backend` profile so the default
-> `up` works on a fresh clone with no extra setup. If you don't start the
-> backend you can still talk to LLM providers and configure tools, but
-> tool execution will fail until you point Settings → HexStrike URL at a
+> ⚠️ The HexStrike backend is **optional** and gated behind a Compose
+> `backend` profile, so the default `up` works on a fresh clone with no extra
+> setup. When you do want real tool execution, this repo can build the backend
+> for you — `docker/hexstrike-backend.Dockerfile` containers the pinned
+> upstream [`0x4m4/hexstrike-ai`](https://github.com/0x4m4/hexstrike-ai) server
+> with a curated set of real CLI tools (nmap, exiftool, binwalk, tcpdump,
+> strings/objdump, file, dig, whois). Build + run the whole stack with:
+>
+> ```bash
+> docker compose --profile backend up -d --build
+> ```
+>
+> Without the backend you can still talk to LLM providers and configure tools,
+> but tool execution will fail until you point Settings → HexStrike URL at a
 > reachable backend (defaults to `http://hexstrike-backend:8888` inside the
-> compose network and is proxied at `/api/` by nginx).
+> compose network and is proxied at `/api/` by nginx). Install more tools at
+> runtime from the UI via the **HexStrike System → install packages** tool.
 
 ### Option 2: Docker Compose directly
 
@@ -71,12 +81,16 @@ docker run -p 4173:8080 hexstrike-ui
 ### Option 4: Development
 
 ```bash
-# Install dependencies
-npm install
+# Install dependencies (use npm ci for a lockfile-faithful install)
+npm ci
 
 # Start development server (or `./start.sh dev` for the same thing)
 npm run dev
+```
 
+With `npm run dev`, Vite proxies browser requests to **`/api/*`** → **`http://127.0.0.1:8888`** (same pattern as Docker nginx). Override the upstream with **`VITE_DEV_PROXY_TARGET`** or **`VITE_DEV_BACKEND_HOST`** / **`VITE_DEV_BACKEND_PORT`** in `.env`. See [`.env.example`](.env.example) for **`VITE_HEXSTRIKE_URL`** (Docker build vs local backend vs same-origin dev).
+
+```bash
 # Type-check, test, build, lint
 npm run typecheck
 npm test
@@ -90,6 +104,17 @@ npm run lint
 The HexStrike backend isn't running. Either start it via
 `./start.sh up --with-backend` or point Settings → HexStrike URL at an
 existing backend (and ensure it allows your origin via CORS).
+
+Run `./scripts/verify-stack.sh` from the repo root to check container status,
+`GET /health` on the backend (port **8888**) and through the UI (port **4173**).
+
+**“Backend not working” but Docker shows healthy**
+The HTTP server may be up while most CLI tools are missing inside the container (`tools_status` in `/health`). Install tools in the backend image or expect many executions to fail until binaries exist.
+
+Settings → **HexStrike Server URL**: use **`/api`** when using the Docker UI so nginx proxies to `hexstrike-backend`. Use **`http://127.0.0.1:8888`** only when the backend listens on the host and port **8888** is published (`docker compose` maps `8888:8888`).
+
+**Docker UI container restarts in a loop (`host not found in upstream "hexstrike-backend"`)**
+Older images resolved the backend hostname at nginx startup. Current `nginx.conf` resolves the upstream at request time so the frontend container can start **without** the backend; `/api/*` then returns **503** with JSON until the backend joins the compose network.
 
 **`docker compose up` fails with `ImageNotFound: hexstrike-backend`**
 You're invoking the backend profile without a built image. Either remove

@@ -22,3 +22,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# External repos cloned at setup/build time (see setup.sh and
+# docker/hexstrike-backend.Dockerfile — these are NOT part of this repo)
+/hexstrike-ai/
+/Awesome-Hacking/
+
+# Playwright E2E artifacts
+/test-results/
+/playwright-report/
+/playwright/.cache/
+.live-smoke.mjs

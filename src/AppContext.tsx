@@ -1,9 +1,18 @@
 /* eslint-disable react-refresh/only-export-components */
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
-import type { AISettings, HexstrikeCategory, HexstrikeTool, WorkspaceType, ToolExecution, QuickAction } from './types'
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  type Dispatch,
+  type SetStateAction,
+} from 'react'
+import type { AISettings, HexstrikeCategory, HexstrikeTool, WorkspaceType, ToolExecution, QuickAction, Message, ChatSession } from './types'
 import { useSettingsStore } from './store'
-import { fetchHexstrikeTools } from './api'
-import { chatHistory } from './chatHistory'
+import { fetchHexstrikeTools, HEXSTRIKE_UI_SYNTHETIC_TOOLS } from './api'
+import { chatHistory, STORAGE_QUOTA_EVENT } from './chatHistory'
 import { useToaster } from './components/Toaster'
 
 interface AppContextValue {
@@ -21,19 +30,22 @@ interface AppContextValue {
   hexstrikeConnected: boolean
   hexstrikeError: string | null
   hexstrikeLoading: boolean
-  refreshHexstrike: () => void
+  refreshHexstrike: () => Promise<boolean>
   sidebarOpen: boolean
   setSidebarOpen: (open: boolean) => void
   // Chat History
   loadChatHistory: () => void
-  saveCurrentChat: (messages: any[], title?: string) => void
-  chatHistory: any[]
+  saveCurrentChat: (messages: Message[], title?: string) => void
+  chatHistory: ChatSession[]
   currentChatId: string | null
   setCurrentChatId: (id: string | null) => void
   deleteChat: (id: string) => void
   clearAllChats: () => void
   exportChats: () => string
   importChats: (json: string) => { success: boolean; imported: number }
+  /** Active chat thread (synced when switching sessions in history). */
+  chatMessages: Message[]
+  setChatMessages: Dispatch<SetStateAction<Message[]>>
   // Workspace
   activeWorkspace: WorkspaceType
   setActiveWorkspace: (type: WorkspaceType) => void
@@ -59,6 +71,14 @@ const QUICK_ACTIONS: QuickAction[] = [
   { id: 'quick-shodan', label: 'Shodan Search', toolName: 'shodan_api', params: { target: '' }, category: 'osint' },
 ]
 
+/** Prepended to every successful HexStrike catalog fetch — agent-callable system tools. */
+const HEXSTRIKE_UI_CATEGORY: HexstrikeCategory = {
+  name: 'hexstrike_system',
+  display_name: 'HexStrike System',
+  tool_count: HEXSTRIKE_UI_SYNTHETIC_TOOLS.length,
+  tools: HEXSTRIKE_UI_SYNTHETIC_TOOLS.map((t) => t.name),
+}
+
 const AppContext = createContext<AppContextValue | null>(null)
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
@@ -73,8 +93,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
   // Chat History State
-  const [chatHistoryList, setChatHistoryList] = useState<any[]>([])
+  const [chatHistoryList, setChatHistoryList] = useState<ChatSession[]>([])
   const [currentChatId, setCurrentChatId] = useState<string | null>(null)
+  const [chatMessages, setChatMessages] = useState<Message[]>([])
+  const prevChatIdRef = useRef<string | null>(null)
 
   // Workspace State
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceType>('chat')
@@ -100,30 +122,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Track previous connection state so we only toast on state transitions.
   const wasConnectedRef = useRef<boolean | null>(null)
 
-  const refreshHexstrike = useCallback(async () => {
+  const refreshHexstrike = useCallback(async (): Promise<boolean> => {
     setHexstrikeLoading(true)
     try {
       setHexstrikeError(null)
       const data = await fetchHexstrikeTools(settings.hexstrikeUrl)
-      setTools(data.tools)
-      setCategories(data.categories)
-      setActiveCategories(new Set(data.categories.map((c) => c.name)))
-      setHexstrikeConnected(true)
-      if (wasConnectedRef.current === false) {
-        toaster.success(`HexStrike connected — ${data.tools.length} tools available`)
-      }
-      wasConnectedRef.current = true
-    } catch (err: any) {
-      setHexstrikeConnected(false)
-      const msg = err?.message ?? 'Connection failed'
-      setHexstrikeError(msg)
-      if (wasConnectedRef.current !== false) {
-        toaster.error(`HexStrike unreachable: ${msg}`, {
-
-        })
-      }
-      wasConnectedRef.current = false
-    } finally {
+      setTools([...HEXSTRIKE_UI_SYNTHETIC_TOOLS, ...data.tools])
+      setCategories([HEXSTRIKE_UI_CATEGORY, ...data.categories])
+       setActiveCategories(new Set(['hexstrike_system', ...data.categories.map((c) => c.name)]))
+       setHexstrikeConnected(true)
+       if (wasConnectedRef.current === false) {
+         toaster.success(`HexStrike connected — ${data.tools.length} tools available`)
+       }
+       wasConnectedRef.current = true
+       return true
+     } catch (err) {
+       setHexstrikeConnected(false)
+       const msg = err instanceof Error ? err.message : 'Connection failed'
+       setHexstrikeError(msg)
+       if (wasConnectedRef.current !== false) {
+         toaster.error(`HexStrike unreachable: ${msg}`)
+       }
+       wasConnectedRef.current = false
+       return false
+     } finally {
       setHexstrikeLoading(false)
     }
   }, [settings.hexstrikeUrl, toaster])
@@ -144,6 +166,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setCurrentChatId(chatHistory.sessions[0].id)
     }
   }, [])
+
+  // Surface localStorage-quota failures from the chat-history store so the
+  // user knows when older chats were dropped (or saving failed entirely)
+  // instead of losing data silently.
+  useEffect(() => {
+    const onQuota = (e: Event) => {
+      const recovered = (e as CustomEvent<{ recovered?: boolean }>).detail?.recovered
+      if (recovered) {
+        toaster.warning('Browser storage full — trimmed the oldest chats to keep saving recent ones.')
+      } else {
+        toaster.error('Browser storage is full — recent chats could not be saved. Export and clear old chats to free space.')
+      }
+      setChatHistoryList([...chatHistory.sessions])
+    }
+    window.addEventListener(STORAGE_QUOTA_EVENT, onQuota)
+    return () => window.removeEventListener(STORAGE_QUOTA_EVENT, onQuota)
+  }, [toaster])
+
+  // When the active session changes, load its messages from storage (single source for sidebar + chat UI).
+  useEffect(() => {
+    if (currentChatId === prevChatIdRef.current) return
+    prevChatIdRef.current = currentChatId
+    if (!currentChatId) {
+      setChatMessages([])
+      return
+    }
+    const session = chatHistory.getSession(currentChatId)
+    if (session?.messages) setChatMessages(session.messages)
+  }, [currentChatId])
 
   const toggleCategory = useCallback((name: string) => {
     setActiveCategories((prev) => {
@@ -168,7 +219,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setChatHistoryList(sessions)
   }, [])
 
-  const saveCurrentChat = useCallback((messages: any[], title?: string) => {
+  const saveCurrentChat = useCallback((messages: Message[], title?: string) => {
     let sessionId = currentChatId
     if (!sessionId) {
       const session = chatHistory.createSession(title)
@@ -191,6 +242,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     chatHistory.clearAll()
     setChatHistoryList([])
     setCurrentChatId(null)
+    setChatMessages([])
+    prevChatIdRef.current = null
   }, [])
 
   const exportChats = useCallback(() => {
@@ -200,6 +253,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const importChats = useCallback((json: string) => {
     const result = chatHistory.importSessions(json)
     setChatHistoryList([...chatHistory.sessions])
+    if (!result.success) return result
+    setCurrentChatId((prev) => {
+      const sessions = chatHistory.sessions
+      if (sessions.length === 0) return null
+      if (prev && sessions.some((s) => s.id === prev)) return prev
+      return sessions[0].id
+    })
     return result
   }, [])
 
@@ -269,6 +329,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         clearAllChats,
         exportChats,
         importChats,
+        chatMessages,
+        setChatMessages,
         // Workspace
         activeWorkspace,
         setActiveWorkspace,

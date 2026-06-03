@@ -1,0 +1,1 @@
+{"ok":false,"error":"hexstrike_backend_unavailable","message":"The HexStrike backend is unreachable. Start the backend container or point Settings to a reachable API URL."}

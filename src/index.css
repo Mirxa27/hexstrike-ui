@@ -1,5 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
-
+/* JetBrains Mono was loaded from Google Fonts here; nginx CSP blocks that in Docker.
+   Use system monospace stacks — no external requests, CSP-safe everywhere. */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -12,7 +12,8 @@ body {
   margin: 0;
   background-color: #0a0a0f;
   color: #e2e8f0;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
   overflow-x: hidden;
 }
 
@@ -99,3 +100,52 @@ body {
 .typing-dot:nth-child(1) { animation: typingDot 1.2s 0s infinite; }
 .typing-dot:nth-child(2) { animation: typingDot 1.2s 0.2s infinite; }
 .typing-dot:nth-child(3) { animation: typingDot 1.2s 0.4s infinite; }
+
+/* Reusable Component Classes */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 text-sm font-medium transition-all rounded-lg px-4 py-2;
+  }
+  .btn-primary {
+    @apply bg-hex-accent hover:brightness-110 text-white shadow-lg shadow-hex-accent/20 disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-secondary {
+    @apply bg-hex-surface border border-hex-border text-hex-text hover:border-hex-accent/50 hover:bg-hex-border/50 disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-danger {
+    @apply bg-red-500/15 text-red-300 border border-red-500/30 hover:bg-red-500/25 disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .input-field {
+    @apply w-full bg-hex-bg border border-hex-border rounded-lg px-3 py-2 text-sm text-hex-text placeholder-hex-muted focus:outline-none focus:border-hex-accent/60 font-mono;
+  }
+  .select-field {
+    @apply input-field appearance-none pr-8 cursor-pointer;
+  }
+  .textarea-field {
+    @apply input-field resize-y leading-relaxed;
+  }
+  .card-panel {
+    @apply bg-hex-surface border border-hex-border rounded-xl p-5;
+  }
+  .card-section {
+    @apply card-panel p-4;
+  }
+  .section-header {
+    @apply flex items-center gap-2 text-sm font-semibold text-hex-text mb-4 border-l-2 border-hex-accent pl-3;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+  .badge-success {
+    @apply bg-hex-green/20 text-hex-green;
+  }
+  .badge-error {
+    @apply bg-hex-accent/20 text-hex-accent;
+  }
+  .badge-warning {
+    @apply bg-hex-yellow/20 text-hex-yellow;
+  }
+  .badge-info {
+    @apply bg-hex-cyan/20 text-hex-cyan;
+  }
+}

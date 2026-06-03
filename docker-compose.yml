@@ -42,10 +42,11 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /var/cache/nginx:size=64M,mode=0755,uid=1001,gid=1001
+      - /var/run/nginx:size=8M,mode=0755,uid=1001,gid=1001
       - /var/run:size=8M,mode=0755,uid=1001,gid=1001
       - /tmp:size=16M,mode=1777
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -57,6 +58,14 @@ services:
   backend:
     profiles: ["backend"]
     image: ${HEXSTRIKE_BACKEND_IMAGE:-hexstrike-backend:latest}
+    # Build the backend image from the pinned upstream HexStrike server
+    # (github.com/0x4m4/hexstrike-ai). `docker compose --profile backend up
+    # --build` builds it; otherwise a pre-built ${HEXSTRIKE_BACKEND_IMAGE} is used.
+    build:
+      context: .
+      dockerfile: docker/hexstrike-backend.Dockerfile
+      args:
+        HEXSTRIKE_REF: ${HEXSTRIKE_REF:-9b8c780f324ce5145a322bfa23c98886f8424ba3}
     container_name: hexstrike-backend
     ports:
       - "${BACKEND_PORT:-8888}:8888"

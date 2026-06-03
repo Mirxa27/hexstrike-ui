@@ -21,8 +21,7 @@ import {
 import { Provider } from '../types'
 import type { AISettings } from '../types'
 import { useApp } from '../AppContext'
-import { fetchModels } from '../api'
-import { fetchHexstrikeTools } from '../api'
+import { fetchModels, fetchHexstrikeTools, coerceHexstrikeUrlInput } from '../api'
 import { useToaster } from '../components/Toaster'
 
 // ── Provider definitions ─────────────────────────────────────────────────────
@@ -53,34 +52,6 @@ const DEFAULT_BASE_PLACEHOLDER: Record<string, string> = {
   [Provider.lmstudio]: 'http://localhost:1234/v1',
   [Provider.ollama]: 'http://localhost:11434',
   [Provider.custom]: 'https://your-api-endpoint.com/v1',
-}
-
-// ── Toast ────────────────────────────────────────────────────────────────────
-
-interface ToastProps {
-  message: string
-  type: 'success' | 'error'
-  onClose: () => void
-}
-
-function Toast({ message, type, onClose }: ToastProps) {
-  useEffect(() => {
-    const t = setTimeout(onClose, 3000)
-    return () => clearTimeout(t)
-  }, [onClose])
-
-  return (
-    <div
-      className={`fixed bottom-6 right-6 flex items-center gap-2 px-4 py-3 rounded-lg border text-sm font-mono z-50 shadow-lg ${
-        type === 'success'
-          ? 'bg-[#0f0f1a] border-[#00ff41]/50 text-[#00ff41]'
-          : 'bg-[#0f0f1a] border-[#e63946]/50 text-[#e63946]'
-      }`}
-    >
-      {type === 'success' ? <CheckCircle size={14} /> : <XCircle size={14} />}
-      {message}
-    </div>
-  )
 }
 
 // ── Section wrapper ──────────────────────────────────────────────────────────
@@ -146,7 +117,6 @@ export function SettingsPage() {
   } | null>(null)
   const [verifyingKey, setVerifyingKey] = useState(false)
   const [keyStatus, setKeyStatus] = useState<{ ok: boolean; message: string } | null>(null)
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
 
   // Sync draft if settings change externally
   useEffect(() => {
@@ -158,43 +128,47 @@ export function SettingsPage() {
   const currentProvider = PROVIDERS.find((p) => p.id === draft.provider)
 
   // Fetch models
-  const handleFetchModels = useCallback(async () => {
-    setFetchingModels(true)
-    setModelError(null)
-    try {
-      const models = await fetchModels(draft)
-      patch({ models, model: models[0] ?? draft.model })
-    } catch (err: any) {
-      setModelError(err?.message ?? 'Failed to fetch models')
-    } finally {
-      setFetchingModels(false)
-    }
-  }, [draft])
+   const handleFetchModels = useCallback(async () => {
+     setFetchingModels(true)
+     setModelError(null)
+     try {
+       const models = await fetchModels(draft)
+       patch({ models, model: models[0] ?? draft.model })
+     } catch (err) {
+       const msg = err instanceof Error ? err.message : String(err)
+       setModelError(msg)
+     } finally {
+       setFetchingModels(false)
+     }
+   }, [draft])
 
-  // Test HexStrike connection
-  const handleTestConnection = useCallback(async () => {
-    setTestingConnection(true)
-    setConnectionStatus(null)
-    const t0 = performance.now()
-    try {
-      const data = await fetchHexstrikeTools(draft.hexstrikeUrl)
-      const latencyMs = Math.round(performance.now() - t0)
-      setConnectionStatus({
-        ok: true,
-        message: `Connected — ${data.tools.length} tools, ${data.categories.length} categories (${latencyMs} ms)`,
-        latencyMs,
-      })
-    } catch (err: any) {
-      const latencyMs = Math.round(performance.now() - t0)
-      setConnectionStatus({
-        ok: false,
-        message: `${err?.message ?? 'Connection failed'} (${latencyMs} ms)`,
-        latencyMs,
-      })
+   // Test HexStrike connection
+   const handleTestConnection = useCallback(async () => {
+     setTestingConnection(true)
+     setConnectionStatus(null)
+     const t0 = performance.now()
+     const hex = coerceHexstrikeUrlInput(draft.hexstrikeUrl)
+     if (hex !== draft.hexstrikeUrl) patch({ hexstrikeUrl: hex })
+     try {
+       const data = await fetchHexstrikeTools(hex)
+       const latencyMs = Math.round(performance.now() - t0)
+       setConnectionStatus({
+         ok: true,
+         message: `Connected — ${data.tools.length} tools, ${data.categories.length} categories (${latencyMs} ms)`,
+         latencyMs,
+       })
+     } catch (err) {
+       const latencyMs = Math.round(performance.now() - t0)
+       const msg = err instanceof Error ? err.message : 'Connection failed'
+       setConnectionStatus({
+         ok: false,
+         message: `${msg} (${latencyMs} ms)`,
+         latencyMs,
+       })
     } finally {
       setTestingConnection(false)
     }
-  }, [draft.hexstrikeUrl])
+  }, [draft])
 
   // Verify the configured API key by issuing a model-list request to the
   // currently selected provider. Successful round-trip means the key is
@@ -203,33 +177,35 @@ export function SettingsPage() {
   const handleVerifyKey = useCallback(async () => {
     setVerifyingKey(true)
     setKeyStatus(null)
-    try {
-      const t0 = performance.now()
-      const models = await fetchModels(draft)
-      const latencyMs = Math.round(performance.now() - t0)
-      setKeyStatus({
-        ok: true,
-        message: `API key accepted — ${models.length} models reachable (${latencyMs} ms)`,
-      })
-    } catch (err: any) {
-      setKeyStatus({ ok: false, message: err?.message ?? 'API key verification failed' })
-    } finally {
+     try {
+       const t0 = performance.now()
+       const models = await fetchModels(draft)
+       const latencyMs = Math.round(performance.now() - t0)
+       setKeyStatus({
+         ok: true,
+         message: `API key accepted — ${models.length} models reachable (${latencyMs} ms)`,
+       })
+     } catch (err) {
+       const msg = err instanceof Error ? err.message : 'API key verification failed'
+       setKeyStatus({ ok: false, message: msg })
+     } finally {
       setVerifyingKey(false)
     }
   }, [draft])
 
   // Save
   const handleSave = () => {
-    updateSettings(draft)
+    const hex = coerceHexstrikeUrlInput(draft.hexstrikeUrl)
+    const toSave = { ...draft, hexstrikeUrl: hex }
+    setDraft(toSave)
+    updateSettings(toSave)
     refreshHexstrike()
-    setToast({ message: 'Settings saved successfully', type: 'success' })
     toaster.success('Settings saved')
   }
 
   // Reset
   const handleReset = () => {
     resetSettings()
-    setToast({ message: 'Settings reset to defaults', type: 'success' })
     toaster.info('Settings reset to defaults')
   }
 
@@ -252,27 +228,27 @@ export function SettingsPage() {
             <Field label="Provider">
               <div className="grid grid-cols-4 gap-2">
                 {PROVIDERS.map((p) => (
-                  <button
-                    key={p.id}
-                    onClick={() => patch({ provider: p.id, model: '', models: [] })}
-                    className={`relative flex flex-col items-center gap-1.5 px-2 py-3 rounded-lg border text-xs font-medium transition-all ${
-                      draft.provider === p.id
-                        ? 'border-[#e63946] bg-[#e63946]/10 text-[#e2e8f0]'
-                        : 'border-[#1a1a2e] bg-[#0a0a0f] text-[#6b7280] hover:border-[#2a2a3e] hover:text-[#94a3b8]'
-                    }`}
-                  >
-                    <div
-                      className="w-2.5 h-2.5 rounded-full"
-                      style={{ backgroundColor: p.color }}
-                    />
-                    <span>{p.label}</span>
-                    {p.local && (
-                      <span className="text-[9px] text-[#6b7280] -mt-0.5">local</span>
-                    )}
-                    {draft.provider === p.id && (
-                      <div className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-[#e63946]" />
-                    )}
-                  </button>
+                <button
+                  key={p.id}
+                  onClick={() => patch({ provider: p.id, model: '', models: [] })}
+                  className={`relative flex flex-col items-center gap-1.5 px-2 py-3 rounded-lg border text-xs font-medium transition-all ${
+                    draft.provider === p.id
+                      ? 'border-hex-accent bg-hex-accent/10 text-hex-text'
+                      : 'border-hex-border bg-hex-bg text-hex-muted hover:border-hex-border/80 hover:text-hex-text-dim'
+                  }`}
+                >
+                  <div
+                    className="w-2.5 h-2.5 rounded-full"
+                    style={{ backgroundColor: p.color }}
+                  />
+                  <span>{p.label}</span>
+                  {p.local && (
+                    <span className="text-[9px] text-hex-muted -mt-0.5">local</span>
+                  )}
+                  {draft.provider === p.id && (
+                    <div className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-hex-accent" />
+                  )}
+                </button>
                 ))}
               </div>
             </Field>
@@ -307,7 +283,7 @@ export function SettingsPage() {
                     type="button"
                     onClick={handleVerifyKey}
                     disabled={verifyingKey || !draft.apiKey}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#0a0a0f] border border-[#1a1a2e] rounded text-[11px] text-[#94a3b8] hover:text-[#e2e8f0] hover:border-[#00d4ff]/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-hex-bg border border-hex-border rounded text-[11px] text-hex-text-dim hover:text-hex-text hover:border-hex-cyan/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {verifyingKey ? (
                       <Loader2 size={11} className="animate-spin text-[#00d4ff]" />
@@ -495,13 +471,17 @@ export function SettingsPage() {
           <div className="space-y-5">
             <Field
               label="HexStrike Server URL"
-              hint="URL of your running HexStrike server instance."
+              hint="Docker / nginx: use /api (same origin). Local backend: http://127.0.0.1:8888. Host:port without http:// is fixed automatically on blur or Test / Save."
             >
               <input
                 type="text"
                 value={draft.hexstrikeUrl}
                 onChange={(e) => patch({ hexstrikeUrl: e.target.value })}
-                placeholder="http://localhost:8888"
+                onBlur={() => {
+                  const hex = coerceHexstrikeUrlInput(draft.hexstrikeUrl)
+                  if (hex !== draft.hexstrikeUrl) patch({ hexstrikeUrl: hex })
+                }}
+                placeholder="/api or http://127.0.0.1:8888"
                 className={inputClass}
               />
             </Field>
@@ -566,7 +546,7 @@ export function SettingsPage() {
           </div>
           <p className="text-[11px] text-[#6b7280] mt-3 flex items-center gap-1">
             <Terminal size={11} />
-            Theme: Cyberpunk Dark — JetBrains Mono
+            Theme: Cyberpunk Dark — system monospace
           </p>
         </Section>
 
@@ -604,11 +584,6 @@ export function SettingsPage() {
           </button>
         </div>
       </div>
-
-      {/* Toast */}
-      {toast && (
-        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
-      )}
     </div>
   )
 }

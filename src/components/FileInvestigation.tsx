@@ -23,17 +23,19 @@ import {
   ChevronRight,
   Zap,
 } from 'lucide-react'
-import type { FileAnalysis, UploadedFile, FileFinding, FileMetadata, ExtractedData } from '../fileAnalysis'
+import type { FileAnalysis, UploadedFile, FileFinding } from '../fileAnalysis'
 import {
   detectFileCategory,
-  getFileAnalysisTools,
-  parseToolOutput,
+  analyzeFileClientSide,
   generateFileNarrative,
 } from '../fileAnalysis'
-import { useApp } from '../AppContext'
-import { executeHexstrikeTool } from '../api'
+import { useToaster } from './Toaster'
 
-const FILE_ICONS: Record<string, any> = {
+// Caps tuned for in-memory base64 handling (base64 inflates raw bytes ~33%).
+const MAX_FILE_BYTES = 15 * 1024 * 1024 // 15 MB per file
+const MAX_TOTAL_BYTES = 60 * 1024 * 1024 // 60 MB total
+
+const FILE_ICONS: Record<string, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
   image: ImageIcon,
   document: FileText,
   executable: Package,
@@ -47,7 +49,7 @@ const FILE_ICONS: Record<string, any> = {
 }
 
 export function FileInvestigation() {
-  const { tools } = useApp()
+  const toaster = useToaster()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
   const [analyses, setAnalyses] = useState<Map<string, FileAnalysis>>(new Map())
@@ -60,42 +62,57 @@ export function FileInvestigation() {
     if (!files || files.length === 0) return
 
     const newFiles: UploadedFile[] = []
+    let runningTotal = uploadedFiles.reduce((s, f) => s + f.size, 0)
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
-      const category = detectFileCategory(file)
 
-      // Read file as base64
-      const reader = new FileReader()
-      const base64Promise = new Promise<string>((resolve) => {
-        reader.onload = (e) => resolve(e.target?.result as string)
-        reader.readAsDataURL(file)
-      })
-      const base64 = await base64Promise
-
-      // Generate preview for images
-      let preview: string | undefined
-      if (category === 'image') {
-        preview = base64
+      // Enforce size caps to avoid exhausting browser memory on large uploads.
+      if (file.size > MAX_FILE_BYTES) {
+        toaster.error(`${file.name}: ${(file.size / 1024 / 1024).toFixed(1)} MB exceeds the ${MAX_FILE_BYTES / 1024 / 1024} MB per-file cap`)
+        continue
+      }
+      if (runningTotal + file.size > MAX_TOTAL_BYTES) {
+        toaster.error(`${file.name}: would exceed the ${MAX_TOTAL_BYTES / 1024 / 1024} MB total cap`)
+        continue
       }
 
-      newFiles.push({
-        id: `file-${Date.now()}-${i}`,
-        name: file.name,
-        size: file.size,
-        type: file.type || 'unknown',
-        category,
-        data: base64,
-        preview,
-      })
+      const category = detectFileCategory(file)
+
+      // Read file as base64. A failure on one file must NOT abort the batch —
+      // catch per-file, notify, and continue with the rest.
+      try {
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = (e) => resolve(e.target?.result as string)
+          reader.onerror = () => reject(new Error(`Failed to read file: ${file.name}`))
+          reader.readAsDataURL(file)
+        })
+
+        const preview = category === 'image' ? base64 : undefined
+        newFiles.push({
+          id: `file-${Date.now()}-${i}`,
+          name: file.name,
+          size: file.size,
+          type: file.type || 'unknown',
+          category,
+          data: base64,
+          preview,
+        })
+        runningTotal += file.size
+      } catch (err) {
+        toaster.error(err instanceof Error ? err.message : `Failed to read ${file.name}`)
+      }
     }
+
+    if (newFiles.length === 0) return
 
     setUploadedFiles((prev) => [...prev, ...newFiles])
 
-    // Create initial analysis entries
-    newFiles.forEach((file) => {
-      setAnalyses((prev) => {
-        const next = new Map(prev)
+    // Create initial analysis entries - batch update to avoid multiple state updates
+    setAnalyses((prev) => {
+      const next = new Map(prev)
+      newFiles.forEach((file) => {
         next.set(file.id, {
           id: file.id,
           file,
@@ -113,112 +130,69 @@ export function FileInvestigation() {
           recommendations: [],
           narrative: '',
         })
-        return next
       })
+      return next
     })
   }
 
-  // Start analysis for a file
+  // Start analysis for a file. Analysis runs entirely in the browser on the
+  // uploaded bytes (the backend has no file-upload endpoint), so it produces
+  // real findings — printable strings, URLs/emails/IPs, potential secrets,
+  // and magic-byte file typing — without needing a reachable HexStrike server.
   const startAnalysis = async (file: UploadedFile) => {
     setIsAnalyzing((prev) => new Set(prev).add(file.id))
 
-    const analysisTools = getFileAnalysisTools(file, tools)
-    const findings: FileFinding[] = []
-    const metadata: FileMetadata = {
-      basic: {
-        filename: file.name,
-        size: `${(file.size / 1024).toFixed(2)} KB`,
-        mimeType: file.type || 'unknown',
-        category: file.category,
-      },
-    }
-    const extractedData: ExtractedData = {}
-
-    // Update analysis status
     setAnalyses((prev) => {
       const next = new Map(prev)
       const existing = next.get(file.id)
       if (existing) {
-        next.set(file.id, {
-          ...existing,
-          status: 'analyzing',
-          startedAt: Date.now(),
-        })
+        next.set(file.id, { ...existing, status: 'analyzing', startedAt: Date.now() })
       }
       return next
     })
 
-    // Execute tools sequentially
-    for (const { tool, reason } of analysisTools) {
-      try {
-        const result = await executeHexstrikeTool(
-          'http://localhost:8888',
-          tool.name,
-          file.name,
-          { file: file.data, reason }
-        )
+    // Yield to the event loop so the "analyzing" spinner paints before a
+    // potentially heavy (multi-MB) synchronous scan.
+    await new Promise((r) => setTimeout(r, 0))
 
-        const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    try {
+      const { findings, extractedData, metadata } = analyzeFileClientSide(file)
+      const recommendations = generateRecommendations(findings, file)
+      const narrative = generateFileNarrative(file, findings, metadata)
 
-        // Parse output and extract findings
-        const toolFindings = parseToolOutput(tool.name, resultStr, file.category)
-        findings.push(...toolFindings)
-
-        // Extract metadata from EXIF tool output
-        if (tool.name.toLowerCase().includes('exif') && resultStr) {
-          const exifData: Record<string, string> = {}
-          resultStr.split('\n').forEach((line) => {
-            const match = line.match(/^([A-Z][^:]+)\s*:\s*(.+)$/)
-            if (match) {
-              exifData[match[1]] = match[2].trim()
-            }
+      setAnalyses((prev) => {
+        const next = new Map(prev)
+        const existing = next.get(file.id)
+        if (existing) {
+          next.set(file.id, {
+            ...existing,
+            status: 'complete',
+            findings,
+            metadata,
+            extractedData,
+            recommendations,
+            narrative,
+            completedAt: Date.now(),
           })
-          if (Object.keys(exifData).length > 0) {
-            metadata.exif = exifData
-          }
         }
-
-        // Extract strings/data
-        if (tool.name.toLowerCase().includes('string') && resultStr) {
-          extractedData.urls = resultStr.match(/https?:\/\/[^\s]+/g) || []
-          extractedData.emails = resultStr.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []
-          extractedData.ips = resultStr.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || []
-        }
-      } catch (err: any) {
-        console.error(`Tool ${tool.name} failed:`, err)
-      }
+        return next
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      toaster.error(`Analysis failed for ${file.name}: ${msg}`)
+      setAnalyses((prev) => {
+        const next = new Map(prev)
+        const existing = next.get(file.id)
+        if (existing) next.set(file.id, { ...existing, status: 'error', completedAt: Date.now() })
+        return next
+      })
+    } finally {
+      setIsAnalyzing((prev) => {
+        const next = new Set(prev)
+        next.delete(file.id)
+        return next
+      })
     }
-
-    // Generate recommendations
-    const recommendations = generateRecommendations(findings, file)
-
-    // Generate narrative
-    const narrative = generateFileNarrative(file, findings, metadata)
-
-    // Update analysis with results
-    setAnalyses((prev) => {
-      const next = new Map(prev)
-      const existing = next.get(file.id)
-      if (existing) {
-        next.set(file.id, {
-          ...existing,
-          status: 'complete',
-          findings,
-          metadata,
-          extractedData,
-          recommendations,
-          narrative,
-          completedAt: Date.now(),
-        })
-      }
-      return next
-    })
-
-    setIsAnalyzing((prev) => {
-      const next = new Set(prev)
-      next.delete(file.id)
-      return next
-    })
   }
 
   // Generate recommendations based on findings
@@ -306,7 +280,7 @@ export function FileInvestigation() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-[#e63946]/10 rounded-lg">
-              <Search className="text-[#e63946]" size={20} />
+              <Search className="text-[#e63946]" width={20} height={20} />
             </div>
             <div>
               <h2 className="text-xl font-bold text-[#e2e8f0]">File Investigation</h2>
@@ -323,12 +297,12 @@ export function FileInvestigation() {
                 >
                   {isAnalyzing.size > 0 ? (
                     <>
-                      <Loader2 size={14} className="animate-spin" />
+                      <Loader2 width={14} height={14} className="animate-spin" />
                       Analyzing ({isAnalyzing.size})
                     </>
                   ) : (
                     <>
-                      <Sparkles size={14} />
+                      <Sparkles width={14} height={14} />
                       Analyze All
                     </>
                   )}
@@ -351,7 +325,7 @@ export function FileInvestigation() {
               onClick={() => fileInputRef.current?.click()}
               className="border-2 border-dashed border-[#1a1a2e] hover:border-[#e63946]/50 rounded-xl p-8 text-center cursor-pointer transition-colors"
             >
-              <Upload size={32} className="mx-auto mb-3 text-[#6b7280]" />
+              <Upload width={32} height={32} className="mx-auto mb-3 text-[#6b7280]" />
               <p className="text-sm text-[#e2e8f0] mb-1">Drop files here or click to upload</p>
               <p className="text-xs text-[#6b7280]">Supports images, documents, executables, PCAPs, archives, and more</p>
             </div>
@@ -381,7 +355,7 @@ export function FileInvestigation() {
           <div className="flex-1 overflow-y-auto p-4 space-y-2">
             {uploadedFiles.length === 0 ? (
               <div className="text-center py-12">
-                <FileText size={48} className="mx-auto mb-3 text-[#1a1a2e]" />
+                <FileText width={48} height={48} className="mx-auto mb-3 text-[#1a1a2e]" />
                 <p className="text-sm text-[#6b7280]">No files uploaded yet</p>
               </div>
             ) : (
@@ -402,13 +376,13 @@ export function FileInvestigation() {
                     }`}
                   >
                     <div className="flex items-start gap-3">
-                      <Icon size={18} className="text-[#e63946] mt-0.5 flex-shrink-0" />
+                      <Icon width={18} height={18} className="text-[#e63946] mt-0.5 flex-shrink-0" />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <p className="text-xs font-medium text-[#e2e8f0] truncate">{file.name}</p>
-                          {fileIsAnalyzing && <Loader2 size={12} className="text-[#f59e0b] animate-spin" />}
-                          {analysis?.status === 'complete' && <CheckCircle2 size={12} className="text-[#00ff41]" />}
-                          {analysis?.status === 'error' && <XCircle size={12} className="text-[#e63946]" />}
+                          {fileIsAnalyzing && <Loader2 width={12} height={12} className="text-[#f59e0b] animate-spin" />}
+                          {analysis?.status === 'complete' && <CheckCircle2 width={12} height={12} className="text-[#00ff41]" />}
+                          {analysis?.status === 'error' && <XCircle width={12} height={12} className="text-[#e63946]" />}
                         </div>
                         <div className="flex items-center gap-2 mt-1">
                           <span className="text-[10px] text-[#6b7280]">{file.category}</span>
@@ -437,7 +411,7 @@ export function FileInvestigation() {
                         }}
                         className="p-1 hover:bg-[#1a1a2e] rounded text-[#6b7280] hover:text-[#e63946] transition-colors"
                       >
-                        <Trash2 size={12} />
+                        <Trash2 width={12} height={12} />
                       </button>
                     </div>
 
@@ -450,7 +424,7 @@ export function FileInvestigation() {
                         }}
                         className="mt-2 w-full flex items-center justify-center gap-1 px-2 py-1 bg-[#e63946]/10 hover:bg-[#e63946]/20 border border-[#e63946]/30 rounded text-[10px] text-[#e63946] transition-colors"
                       >
-                        <Sparkles size={10} />
+                        <Sparkles width={10} height={10} />
                         Analyze
                       </button>
                     )}
@@ -481,7 +455,7 @@ export function FileInvestigation() {
                   onClick={() => downloadReport(selectedAnalysis)}
                   className="flex items-center gap-2 px-3 py-2 bg-[#10b981] hover:bg-[#059669] rounded-lg text-xs text-white transition-colors"
                 >
-                  <Download size={14} />
+                  <Download width={14} height={14} />
                   Export Report
                 </button>
               </div>
@@ -514,8 +488,8 @@ export function FileInvestigation() {
                     ? 'bg-[#f59e0b]/5 border-[#f59e0b]/20'
                     : 'bg-[#1a1a2e] border-[#1a1a2e]'
               }`}>
-                {selectedAnalysis.status === 'complete' && <CheckCircle2 size={16} className="text-[#00ff41]" />}
-                {selectedAnalysis.status === 'analyzing' && <Loader2 size={16} className="text-[#f59e0b] animate-spin" />}
+                {selectedAnalysis.status === 'complete' && <CheckCircle2 width={16} height={16} className="text-[#00ff41]" />}
+                {selectedAnalysis.status === 'analyzing' && <Loader2 width={16} height={16} className="text-[#f59e0b] animate-spin" />}
                 <span className="text-xs font-medium text-[#e2e8f0]">
                   {selectedAnalysis.status === 'complete'
                     ? 'Analysis Complete'
@@ -529,7 +503,7 @@ export function FileInvestigation() {
               {selectedAnalysis.recommendations.length > 0 && (
                 <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-4">
                   <div className="flex items-center gap-2 mb-3">
-                    <AlertTriangle size={16} className="text-[#f59e0b]" />
+                    <AlertTriangle width={16} height={16} className="text-[#f59e0b]" />
                     <span className="text-sm font-semibold text-[#e2e8f0]">Recommendations</span>
                   </div>
                   <div className="space-y-2">
@@ -555,7 +529,7 @@ export function FileInvestigation() {
               {selectedAnalysis.findings.length > 0 && (
                 <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-4">
                   <div className="flex items-center gap-2 mb-4">
-                    <Search size={16} className="text-[#e63946]" />
+                    <Search width={16} height={16} className="text-[#e63946]" />
                     <span className="text-sm font-semibold text-[#e2e8f0]">Findings ({selectedAnalysis.findings.length})</span>
                   </div>
                   <div className="space-y-3">
@@ -570,7 +544,7 @@ export function FileInvestigation() {
               {selectedAnalysis.metadata.exif && Object.keys(selectedAnalysis.metadata.exif).length > 0 && (
                 <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-4">
                   <div className="flex items-center gap-2 mb-4">
-                    <FileText size={16} className="text-[#e63946]" />
+                    <FileText width={16} height={16} className="text-[#e63946]" />
                     <span className="text-sm font-semibold text-[#e2e8f0]">Metadata</span>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-xs">
@@ -590,7 +564,7 @@ export function FileInvestigation() {
                 selectedAnalysis.extractedData.ips?.length) && (
                 <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-4">
                   <div className="flex items-center gap-2 mb-4">
-                    <Zap size={16} className="text-[#e63946]" />
+                    <Zap width={16} height={16} className="text-[#e63946]" />
                     <span className="text-sm font-semibold text-[#e2e8f0]">Extracted Data</span>
                   </div>
 
@@ -639,7 +613,7 @@ export function FileInvestigation() {
               {selectedAnalysis.narrative && (
                 <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-4">
                   <div className="flex items-center gap-2 mb-4">
-                    <FileText size={16} className="text-[#e63946]" />
+                    <FileText width={16} height={16} className="text-[#e63946]" />
                     <span className="text-sm font-semibold text-[#e2e8f0]">Investigation Narrative</span>
                   </div>
                   <div className="prose prose-invert prose-sm max-w-none">
@@ -678,7 +652,7 @@ function FindingCard({ finding }: { finding: FileFinding }) {
       >
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            {finding.severity === 'critical' && <AlertTriangle size={12} className="text-[#e63946]" />}
+            {finding.severity === 'critical' && <AlertTriangle width={12} height={12} className="text-[#e63946]" />}
             <span className="text-xs font-medium text-[#e2e8f0]">{finding.title}</span>
             <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
               finding.severity === 'critical'
@@ -694,7 +668,7 @@ function FindingCard({ finding }: { finding: FileFinding }) {
           </div>
           <p className="text-[10px] text-[#94a3b8] mt-1">{finding.description}</p>
         </div>
-        {expanded ? <ChevronDown size={14} className="text-[#6b7280]" /> : <ChevronRight size={14} className="text-[#6b7280]" />}
+        {expanded ? <ChevronDown width={14} height={14} className="text-[#6b7280]" /> : <ChevronRight width={14} height={14} className="text-[#6b7280]" />}
       </div>
 
       {expanded && finding.evidence.length > 0 && (

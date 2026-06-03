@@ -44,7 +44,18 @@ const WORKSPACE_CONFIGS: Record<
     description: 'Open Source Intelligence gathering',
     color: '#3b82f6',
     placeholder: 'Enter target domain, IP, email, username...',
-    commonTools: ['shodan_api', 'theharvester_osint', 'subfinder_enum', 'amass_enum', 'whois_lookup'],
+    commonTools: [
+      'shodan_api',
+      'censys_api',
+      'theharvester_osint',
+      'subfinder_enum',
+      'amass_enum',
+      'whois_lookup',
+      'holehe_email',
+      'sherlock_osint',
+      'social_analyzer',
+      'gau_urls',
+    ],
     presets: [
       { name: 'Full Recon', target: '', options: '--full --recursive' },
       { name: 'Email Harvest', target: '', options: '--emails --deep' },
@@ -170,14 +181,12 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
     }
   }
 
-  const updateForm = (index: number, field: keyof ToolForm, value: string) => {
-    const newForms = [...forms]
-    if (field === 'advancedOptions') {
-      // Don't update advancedOptions via this function
-      return
-    }
-    newForms[index][field] = value
-    setForms(newForms)
+  // Functional + immutable update so (a) we never mutate a form object that
+  // React still holds a reference to, and (b) consecutive calls in the same
+  // tick (e.g. applyPreset setting target then options) compose correctly
+  // instead of the second `setForms` clobbering the first via a stale closure.
+  const updateForm = (index: number, field: Exclude<keyof ToolForm, 'advancedOptions'>, value: string) => {
+    setForms((prev) => prev.map((f, i) => (i === index ? { ...f, [field]: value } : f)))
   }
 
   const executeTool = async (index: number) => {
@@ -198,28 +207,33 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
 
     try {
       const params = form.options ? { raw: form.options } : undefined
+      // Pass the configured URL as-is. Empty string = same-origin (`/api`
+      // via the dev proxy or nginx in Docker). The old `|| 'http://localhost:8888'`
+      // fallback was wrong inside Docker, where the browser can't reach the
+      // backend container on localhost:8888.
       const result = await executeHexstrikeTool(
-        settings.hexstrikeUrl || 'http://localhost:8888',
+        settings.hexstrikeUrl,
         form.toolName,
         form.target,
         params
       )
-      const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
-      setResults((prev) => ({ ...prev, [index]: resultStr }))
-      addWorkspaceExecution({
-        ...exec,
-        status: 'done',
-        result: resultStr,
-      })
-    } catch (err: any) {
-      const errorStr = `Error: ${err?.message ?? String(err)}`
-      setResults((prev) => ({ ...prev, [index]: errorStr }))
-      addWorkspaceExecution({
-        ...exec,
-        status: 'error',
-        result: errorStr,
-      })
-    } finally {
+       const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+       setResults((prev) => ({ ...prev, [index]: resultStr }))
+       addWorkspaceExecution({
+         ...exec,
+         status: 'done',
+         result: resultStr,
+       })
+     } catch (err) {
+       const msg = err instanceof Error ? err.message : String(err)
+       const errorStr = `Error: ${msg}`
+       setResults((prev) => ({ ...prev, [index]: errorStr }))
+       addWorkspaceExecution({
+         ...exec,
+         status: 'error',
+         result: errorStr,
+       })
+     } finally {
       setRunning((prev) => {
         const next = new Set(prev)
         next.delete(index)
@@ -237,6 +251,7 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
   }
 
   const applyPreset = (index: number, preset: { name: string; target: string; options?: string }) => {
+    if (preset.target) updateForm(index, 'target', preset.target)
     updateForm(index, 'options', preset.options || '')
   }
 
@@ -258,22 +273,22 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
   ]
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0a0f]">
+    <div className="flex flex-col h-full bg-hex-bg">
       {/* Header */}
-      <div className="border-b border-[#1a1a2e] bg-[#0f0f1a] px-6 py-4">
+      <div className="border-b border-hex-border bg-hex-surface px-6 py-4">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-xl font-bold text-[#e2e8f0] flex items-center gap-2">
-              <Terminal size={20} className="text-[${config.color}]}" />
+            <h2 className="text-xl font-bold text-hex-text flex items-center gap-2">
+              <Terminal size={20} style={{ color: config.color }} />
               {config.title}
             </h2>
-            <p className="text-sm text-[#6b7280] mt-1">{config.description}</p>
+            <p className="text-sm text-hex-muted mt-1">{config.description}</p>
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={executeAll}
               disabled={forms.every((f) => !f.toolName || !f.target)}
-              className="flex items-center gap-2 px-4 py-2 bg-[#e63946] hover:bg-[#c1121f] disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+              className="btn-primary flex items-center gap-2 px-4 py-2 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
             >
               <Play size={14} />
               Execute All
@@ -286,8 +301,8 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-6xl mx-auto space-y-6">
           {/* Quick Target Insert */}
-          <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-4">
-              <div className="flex items-center gap-2 text-xs text-[#6b7280] mb-3">
+          <div className="card-panel p-4">
+              <div className="flex items-center gap-2 text-xs text-hex-muted mb-3">
                 <Target size={12} />
                 <span>Quick Target Insert</span>
               </div>
@@ -301,7 +316,7 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
                         updateForm(firstEmpty, 'target', qt.value)
                       }
                     }}
-                    className="px-3 py-1.5 bg-[#1a1a2e] hover:bg-[#1a1a2e]/80 border border-[#1a1a2e] hover:border-[#e63946]/50 rounded text-xs text-[#94a3b8] transition-colors"
+                    className="px-3 py-1.5 bg-hex-border hover:bg-hex-border/80 border border-hex-border hover:border-hex-accent/50 rounded text-xs text-hex-text-dim transition-colors"
                   >
                     {qt.label}
                   </button>
@@ -330,14 +345,14 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
 
           {/* Tool Forms */}
           {forms.map((form, index) => (
-            <div key={index} className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-5">
+            <div key={index} className="card-panel p-5">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
-                  <span className="text-xs font-mono text-[#e63946]">#{index + 1}</span>
+                  <span className="text-xs font-mono text-hex-accent">#{index + 1}</span>
                   <select
                     value={form.toolName}
                     onChange={(e) => updateForm(index, 'toolName', e.target.value)}
-                    className="bg-[#0a0a0f] border border-[#1a1a2e] rounded-lg px-3 py-2 text-sm text-[#e2e8f0] focus:border-[#e63946]/60 focus:outline-none min-w-[200px]"
+                    className="select-field min-w-[200px]"
                   >
                     <option value="">Select tool...</option>
                     {workspaceTools.map((t) => (
@@ -354,7 +369,7 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
                         <button
                           key={preset.name}
                           onClick={() => applyPreset(index, preset)}
-                          className="px-2 py-1 bg-[#1a1a2e] hover:bg-[#1a1a2e]/80 rounded text-xs text-[#6b7280] hover:text-[#e63946] transition-colors"
+                          className="px-2 py-1 bg-hex-border hover:bg-hex-border/80 rounded text-xs text-hex-muted hover:text-hex-accent transition-colors"
                         >
                           {preset.name}
                         </button>
@@ -364,7 +379,7 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
                   {forms.length > 1 && (
                     <button
                       onClick={() => removeForm(index)}
-                      className="p-1.5 hover:bg-[#1a1a2e] rounded text-[#6b7280] hover:text-[#e63946] transition-colors"
+                      className="p-1.5 hover:bg-hex-border rounded text-hex-muted hover:text-hex-accent transition-colors"
                     >
                       <Minus size={14} />
                     </button>
@@ -375,13 +390,13 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* Target */}
                 <div className="md:col-span-2">
-                  <label className="block text-xs text-[#6b7280] mb-1.5">Target</label>
+                  <label className="block text-xs text-hex-muted mb-1.5">Target</label>
                   <input
                     type="text"
                     value={form.target}
                     onChange={(e) => updateForm(index, 'target', e.target.value)}
                     placeholder={config.placeholder}
-                    className="w-full bg-[#0a0a0f] border border-[#1a1a2e] rounded-lg px-3 py-2 text-sm text-[#e2e8f0] placeholder-[#6b7280] focus:border-[#e63946]/60 focus:outline-none font-mono"
+                    className="input-field font-mono"
                   />
                 </div>
 
@@ -390,7 +405,7 @@ export function WorkspacePanel({ workspaceType, tools }: WorkspacePanelProps) {
                   <button
                     onClick={() => executeTool(index)}
                     disabled={!form.toolName || !form.target || running.has(index)}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-[#e63946] hover:bg-[#c1121f] disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+                    className="btn-primary w-full flex items-center justify-center gap-2 px-4 py-2 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
                   >
                     {running.has(index) ? (
                       <>

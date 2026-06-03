@@ -11,6 +11,10 @@ import {
   suggestReasoningEffort,
   readUsageFromChunk,
   addUsage,
+  analyzeToolAvailability,
+  detectMissingToolFromError,
+  generateAutoInstallStep,
+  entitiesByTool,
 } from '../agent'
 import { Provider } from '../types'
 
@@ -155,5 +159,177 @@ describe('usage accounting', () => {
   })
   it('addUsage accumulates', () => {
     expect(addUsage({ in: 1, out: 2 }, { in: 3, out: 4 })).toEqual({ in: 4, out: 6 })
+  })
+})
+
+describe('analyzeToolAvailability', () => {
+  it('detects missing tools from available catalog', () => {
+    const available = [
+      { name: 'nmap_scan', description: 'Port scanner', category: 'network_reconnaissance' },
+      { name: 'nuclei_templates', description: 'Vuln scanner', category: 'web_application_security' },
+    ]
+    const result = analyzeToolAvailability(['nmap_scan', 'subfinder_enum', 'nuclei_templates'], available, null)
+    expect(result.missingTools).toContain('subfinder_enum')
+    expect(result.missingTools).not.toContain('nmap_scan')
+    expect(result.missingTools).not.toContain('nuclei_templates')
+  })
+
+  it('returns empty missing when all tools available', () => {
+    const available = [
+      { name: 'nmap_scan', description: 'Port scanner', category: 'network_reconnaissance' },
+    ]
+    const result = analyzeToolAvailability(['nmap_scan'], available, null)
+    expect(result.missingTools).toEqual([])
+  })
+
+  it('detects package manager from health info', () => {
+    const available: { name: string; description: string; category: string }[] = []
+    const health = { package_managers: { apt: true }, os_type: 'linux' }
+    const result = analyzeToolAvailability(['nmap'], available, health)
+    expect(result.packageManager).toBe('apt')
+  })
+
+  it('prefers apt over apk when both present', () => {
+    const available: { name: string; description: string; category: string }[] = []
+    const health = { package_managers: { apt: true, apk: true }, os_type: 'linux' }
+    const result = analyzeToolAvailability(['nmap'], available, health)
+    expect(result.packageManager).toBe('apt')
+  })
+
+  it('falls back to pip when no apt/apk', () => {
+    const available: { name: string; description: string; category: string }[] = []
+    const health = { package_managers: { pip: true }, os_type: 'unknown' }
+    const result = analyzeToolAvailability(['nmap'], available, health)
+    expect(result.packageManager).toBe('pip3')
+  })
+
+  it('returns null package manager when nothing available', () => {
+    const available: { name: string; description: string; category: string }[] = []
+    const result = analyzeToolAvailability(['nmap'], available, null)
+    expect(result.packageManager).toBeNull()
+    expect(result.canInstall).toBe(false)
+  })
+})
+
+describe('detectMissingToolFromError', () => {
+  it('detects "command not found" pattern', () => {
+    expect(detectMissingToolFromError('bash: nmap: command not found')).toBe('nmap')
+  })
+
+  it('detects "no such file" pattern', () => {
+    expect(detectMissingToolFromError('/usr/bin/nmap: no such file or directory')).toBe('nmap')
+  })
+
+  it('detects "tool not found" pattern', () => {
+    expect(detectMissingToolFromError("tool 'subfinder' not found")).toBe('subfinder')
+  })
+
+  it('detects "package not installed" pattern', () => {
+    expect(detectMissingToolFromError("package 'nuclei' is not installed")).toBe('nuclei')
+  })
+
+  it('returns null for empty input', () => {
+    expect(detectMissingToolFromError('')).toBeNull()
+  })
+
+  it('returns null for unrelated errors', () => {
+    expect(detectMissingToolFromError('connection timeout')).toBeNull()
+  })
+})
+
+describe('generateAutoInstallStep', () => {
+  it('generates install step for known tools', () => {
+    const step = generateAutoInstallStep('nmap', 'apt')
+    expect(step).not.toBeNull()
+    expect(step!.tool).toBe('hexstrike_install_packages')
+    expect(step!.target).toBe('apt:nmap')
+    expect(step!.reason).toContain('nmap')
+  })
+
+  it('returns null when no package manager available', () => {
+    const step = generateAutoInstallStep('nmap', null)
+    expect(step).toBeNull()
+  })
+
+  it('covers extended tool list', () => {
+    const tools = ['subfinder', 'amass', 'httpx', 'ffuf', 'sqlmap', 'hashcat']
+    for (const tool of tools) {
+      const step = generateAutoInstallStep(tool, 'apt')
+      expect(step).not.toBeNull()
+      expect(step!.target).toContain('apt:')
+    }
+  })
+
+  it('uses tool name as package when no mapping exists', () => {
+    const step = generateAutoInstallStep('custom_tool', 'apt')
+    expect(step).not.toBeNull()
+    expect(step!.target).toBe('apt:custom_tool')
+  })
+
+  it('generates apk-based install steps', () => {
+    const step = generateAutoInstallStep('nmap', 'apk')
+    expect(step).not.toBeNull()
+    expect(step!.target).toBe('apk:nmap')
+  })
+})
+
+describe('entitiesByTool', () => {
+  it('extracts entities grouped by tool name', () => {
+    const executions = [
+      {
+        id: '1',
+        toolName: 'nmap_scan',
+        target: 'example.com',
+        status: 'done' as const,
+        result: '10.0.0.1 80/tcp open\n10.0.0.2 443/tcp open',
+        timestamp: Date.now(),
+      },
+    ]
+    const result = entitiesByTool(executions)
+    expect(result.nmap_scan.ips).toContain('10.0.0.1')
+    expect(result.nmap_scan.ips).toContain('10.0.0.2')
+    expect(result.nmap_scan.ports).toContain(80)
+    expect(result.nmap_scan.ports).toContain(443)
+  })
+
+  it('skips executions without results', () => {
+    const executions = [
+      {
+        id: '1',
+        toolName: 'nmap_scan',
+        target: 'example.com',
+        status: 'error' as const,
+        result: undefined,
+        timestamp: Date.now(),
+      },
+    ]
+    const result = entitiesByTool(executions)
+    expect(Object.keys(result)).toHaveLength(0)
+  })
+
+  it('merges entities from multiple executions of same tool', () => {
+    const executions = [
+      {
+        id: '1',
+        toolName: 'nmap_scan',
+        target: 'example.com',
+        status: 'done' as const,
+        result: '10.0.0.1 80/tcp open',
+        timestamp: Date.now(),
+      },
+      {
+        id: '2',
+        toolName: 'nmap_scan',
+        target: 'example.com',
+        status: 'done' as const,
+        result: '10.0.0.2 443/tcp open',
+        timestamp: Date.now(),
+      },
+    ]
+    const result = entitiesByTool(executions)
+    expect(result.nmap_scan.ips).toContain('10.0.0.1')
+    expect(result.nmap_scan.ips).toContain('10.0.0.2')
+    expect(result.nmap_scan.ports).toContain(80)
+    expect(result.nmap_scan.ports).toContain(443)
   })
 })
