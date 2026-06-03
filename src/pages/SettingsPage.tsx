@@ -314,7 +314,7 @@ export function SettingsPage() {
                   draft.provider === Provider.ollama
                     ? 'Default: http://localhost:11434 — run `ollama serve` first.'
                     : draft.provider === Provider.lmstudio
-                    ? 'Paste the LM Studio server address (e.g. http://localhost:1234) — /v1 is added automatically. Start it via Developer → Start Server, load a model, and enable CORS.'
+                    ? 'http://localhost:1234 (/v1 auto-added) — start LM Studio via Developer → Start Server, load a model, and ENABLE CORS. Running the Docker UI? Use "/lmstudio" instead to proxy same-origin (no CORS needed).'
                     : 'Full base URL for your API endpoint'
                 }
               >

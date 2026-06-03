@@ -144,7 +144,9 @@ No key required, fully offline. Bump quality with `OLLAMA_MODEL=qwen2.5:3b` (or 
 
 **Other free options:**
 
-- **LM Studio (local)** — Download from [lmstudio.ai](https://lmstudio.ai), start the server (enable CORS), then set **Provider: LM Studio**, Base URL `http://localhost:1234` (`/v1` is auto-appended), and Fetch. No key required.
+- **LM Studio (local)** — Download from [lmstudio.ai](https://lmstudio.ai), start the server, then set **Provider: LM Studio** and Fetch. No key required. Two ways to connect:
+  - **Docker UI (easiest):** set Base URL to **`/lmstudio`** — nginx proxies to your host LM Studio same-origin, so you do **not** need to enable CORS.
+  - **Direct:** set Base URL to `http://localhost:1234` (`/v1` auto-appended) and **enable CORS** in LM Studio's server settings (otherwise the browser blocks the fetch).
 - **Free cloud tiers** — Get a free key and select the matching provider:
   - **Groq** — [console.groq.com/keys](https://console.groq.com/keys) (fast, generous free tier)
   - **Google Gemini** — [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (generous free tier)

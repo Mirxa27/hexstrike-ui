@@ -33,6 +33,11 @@ services:
     environment:
       - NODE_ENV=production
     restart: unless-stopped
+    # Lets nginx reach a LM Studio / Ollama server running on the Docker host
+    # (for the same-origin /lmstudio proxy). Auto-provided on Docker Desktop;
+    # this entry adds it on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - hexstrike-network
     read_only: true
