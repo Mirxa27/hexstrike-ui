@@ -105,6 +105,24 @@ export async function mockOpenAIChat(page: Page, reply: string): Promise<void> {
 }
 
 /**
+ * Mock OpenAI chat-completions returning a DIFFERENT reply per call (turn),
+ * repeating the last one. Lets a test exercise the multi-turn autonomous loop.
+ */
+export async function mockOpenAIChatSequence(page: Page, replies: string[]): Promise<void> {
+  let i = 0
+  await page.route('https://api.openai.com/v1/chat/completions', (route) => {
+    const reply = replies[Math.min(i, replies.length - 1)]
+    i++
+    route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      headers: { 'cache-control': 'no-cache' },
+      body: openAISSE([reply]),
+    })
+  })
+}
+
+/**
  * Mock LM Studio's chat endpoint at the canonical `/v1` path. The route URL is
  * exact, so it only matches if the app correctly appended `/v1` to a bare
  * `http://localhost:1234` base — proving the LM Studio base-URL normalization.

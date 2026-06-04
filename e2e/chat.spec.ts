@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { seedSettings, mockBackendHealthy, mockOpenAIChat, mockLmStudioChat } from './helpers'
+import { seedSettings, mockBackendHealthy, mockOpenAIChat, mockOpenAIChatSequence, mockLmStudioChat } from './helpers'
 
 test.describe('Chat flow (mocked LLM)', () => {
   test('sends a message and renders the streamed assistant reply', async ({ page }) => {
@@ -61,6 +61,37 @@ test.describe('Chat flow (mocked LLM)', () => {
     await input.press('Enter')
 
     await expect(page.getByRole('main').getByText('Local model reply: recon queued on the target.')).toBeVisible({ timeout: 15_000 })
+  })
+
+  test('Auto-run keeps looping across turns, shows live output in the Agent tab, and stops on the sentinel', async ({ page }) => {
+    await seedSettings(page, { provider: 'openai', model: 'gpt-4o', autocomplete: true })
+    await mockBackendHealthy(page)
+    // Turn 1: no tools, no sentinel → loop must continue. Turn 2: sentinel → stop.
+    await mockOpenAIChatSequence(page, [
+      'Step 1: starting reconnaissance on the target.',
+      'Step 2: analysis complete. <<TASK_COMPLETE>>',
+    ])
+
+    await page.goto('/')
+    const input = page.getByPlaceholder('Message HexStrike…')
+    await input.fill('Recon example.com end to end')
+    await input.press('Enter')
+
+    const main = page.getByRole('main')
+    // Auto mode switches to the Agent tab — the agent's live output renders there
+    // (the old panel showed nothing but tool calls). Final turn is shown.
+    await expect(main.getByText(/Step 2: analysis complete/)).toBeVisible({ timeout: 20_000 })
+    // Sentinel token is stripped from what the user sees.
+    await expect(page.getByText('<<TASK_COMPLETE>>')).toHaveCount(0)
+    // Run finished → composer interactive again.
+    await expect(input).toBeEnabled({ timeout: 20_000 })
+
+    // The loop actually continued past turn 1: both turns exist in the transcript.
+    await page.getByRole('tab', { name: /Messages/ }).click()
+    await expect(main.getByText(/Step 1: starting reconnaissance/)).toBeVisible()
+    await expect(main.getByText(/Step 2: analysis complete/)).toBeVisible()
+    // The internal continuation prompt is hidden from the transcript.
+    await expect(main.getByText(/Continue working toward the objective/)).toHaveCount(0)
   })
 
   test('example prompt populates the composer', async ({ page }) => {

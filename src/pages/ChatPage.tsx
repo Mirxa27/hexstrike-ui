@@ -99,8 +99,13 @@ function AgentActivityPanel({
   currentToolExecution: string | null
   messages: Message[]
 }) {
-  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant')
-  const toolCalls = lastAssistant?.toolCalls ?? []
+  // Live view of the agent's work: the latest assistant turn's text + tools,
+  // plus a cumulative log of every action taken this run. Continuation prompts
+  // (role 'user', id `continuation-…`) are excluded.
+  const assistantTurns = messages.filter((m) => m.role === 'assistant')
+  const lastAssistant = assistantTurns[assistantTurns.length - 1]
+  const lastTurnTools = (lastAssistant?.toolCalls ?? []).filter((tc) => tc.name !== 'file_attach')
+  const allTools = assistantTurns.flatMap((m) => m.toolCalls ?? []).filter((tc) => tc.name !== 'file_attach')
 
   const showIntro = messages.length === 0 && !isStreaming
 
@@ -112,13 +117,18 @@ function AgentActivityPanel({
         </div>
         <h2 className="text-lg font-semibold text-[#f1f5f9] mb-2">Agent run</h2>
         <p className="text-sm text-[#94a3b8] max-w-sm leading-relaxed">
-          Turn on <span className="text-[#86efac] font-medium">Auto</span> if you want chained tool runs, then send a task.
-          Live iterations and tools appear here — use the <span className="text-[#cbd5e1]">Messages</span> tab for the full
-          transcript.
+          With <span className="text-[#86efac] font-medium">Auto</span> on, send a task and the agent keeps working —
+          taking actions and chaining tools — until the objective is met. Its live output and every action appear here.
         </p>
       </div>
     )
   }
+
+  const statusIcon = (status: ToolCall['status']) =>
+    status === 'running' ? <Loader2 size={12} className="text-amber-400 animate-spin shrink-0" />
+      : status === 'done' ? <CheckCircle size={12} className="text-emerald-400 shrink-0" />
+      : status === 'error' ? <XCircle size={12} className="text-red-400 shrink-0" />
+      : <Terminal size={12} className="text-sky-400 shrink-0" />
 
   return (
     <div className="max-w-4xl mx-auto px-3 sm:px-4 py-5 space-y-4 w-full">
@@ -134,31 +144,54 @@ function AgentActivityPanel({
         />
       )}
 
+      {/* Live agent output — the latest assistant turn (streaming text + tools) */}
+      <div className="rounded-xl border border-[#2a2a3d]/80 bg-[#101018]/90 backdrop-blur-sm p-4">
+        <h3 className="text-[10px] uppercase tracking-widest text-[#64748b] mb-3 flex items-center gap-2">
+          <Bot size={12} className="text-[#86efac]" />
+          Agent output
+          {isStreaming && <Loader2 size={11} className="text-emerald-400 animate-spin" />}
+        </h3>
+        {lastAssistant?.content ? (
+          <div className="prose-hex text-sm">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
+              {lastAssistant.content}
+            </ReactMarkdown>
+          </div>
+        ) : isStreaming ? (
+          <div className="flex items-center gap-2 text-sm text-[#64748b]">
+            <Loader2 size={13} className="animate-spin" /> Thinking…
+          </div>
+        ) : (
+          <p className="text-sm text-[#64748b]">No agent output yet.</p>
+        )}
+        {lastTurnTools.length > 0 && (
+          <div className="mt-3 space-y-1">
+            {lastTurnTools.map((tc) => (
+              <ToolCallCard key={tc.id} toolCall={tc} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Cumulative actions log across the whole run */}
       <div className="rounded-xl border border-[#2a2a3d]/80 bg-[#101018]/90 backdrop-blur-sm p-4">
         <h3 className="text-[10px] uppercase tracking-widest text-[#64748b] mb-3 flex items-center gap-2">
           <Sparkles size={12} className="text-[#fbbf24]" />
-          Tool activity
+          Actions this run ({allTools.length})
         </h3>
-        {toolCalls.length === 0 ? (
+        {allTools.length === 0 ? (
           <p className="text-sm text-[#64748b]">
-            {isStreaming ? 'Waiting for tool calls from the model…' : 'No tools in the last assistant turn yet.'}
+            {isStreaming ? 'No tools called yet — the agent may be reasoning or your model may not support tools.' : 'No tools called this run.'}
           </p>
         ) : (
           <ul className="space-y-2">
-            {toolCalls.map((tc) => (
+            {allTools.map((tc, i) => (
               <li
-                key={tc.id}
+                key={`${tc.id}-${i}`}
                 className="flex flex-wrap items-center gap-2 text-xs font-mono rounded-lg bg-[#0a0a12]/80 px-3 py-2 border border-[#1e1e2e]"
               >
-                {tc.status === 'running' ? (
-                  <Loader2 size={12} className="text-amber-400 animate-spin shrink-0" />
-                ) : tc.status === 'done' ? (
-                  <CheckCircle size={12} className="text-emerald-400 shrink-0" />
-                ) : tc.status === 'error' ? (
-                  <XCircle size={12} className="text-red-400 shrink-0" />
-                ) : (
-                  <Terminal size={12} className="text-sky-400 shrink-0" />
-                )}
+                <span className="text-[#475569] tabular-nums">{i + 1}.</span>
+                {statusIcon(tc.status)}
                 <span className="text-sky-300 font-medium">{tc.name}</span>
                 {(tc.arguments.target || tc.arguments.domain) != null && (
                   <span className="text-[#64748b] truncate max-w-[min(100%,220px)]">
@@ -172,7 +205,7 @@ function AgentActivityPanel({
       </div>
 
       <p className="text-[11px] text-[#475569] text-center px-2">
-        Auto mode chains up to {maxIteration} assistant turns. Press Stop or Escape to end early.
+        Auto mode keeps working until the objective is met (up to {maxIteration} turns). Press Stop or Escape to end early.
       </p>
     </div>
   )
@@ -368,24 +401,32 @@ function EmptyState({ onPrompt }: { onPrompt: (text: string) => void }) {
 // ── Main ChatPage ────────────────────────────────────────────────────────────
 
 const MAX_AUTO_ITERATIONS = 25
+
+// Explicit token the model is instructed to emit ONLY when the objective is
+// fully met. This — not fuzzy keyword guessing — is the primary "done" signal,
+// so the autonomous loop keeps working until the goal is actually achieved.
+const COMPLETION_SENTINEL = '<<TASK_COMPLETE>>'
+const COMPLETION_RE = /<<\s*task[_\s-]*complete\s*>>/i
+
 const TASK_COMPLETION_MARKERS = [
+  // Fallback phrases in case the model finishes without the sentinel. Kept
+  // decisive (no bare 'results:'/'summary:') to avoid premature termination.
   'task complete',
   'task completed',
-  'successfully completed',
-  'all done',
-  'scan complete',
-  'reconnaissance complete',
-  'finished scanning',
   'objective complete',
-  'mission complete',
-  // NOTE: deliberately NOT including bare 'results:' / 'summary:' — those words
-  // appear constantly in normal tool output (e.g. "the scan results:") and
-  // would terminate the autonomous loop prematurely. Use decisive phrases only.
-  'final summary:',
+  'objective achieved',
   'assessment complete',
+  'mission complete',
+  'all done',
 ]
 
+/** Remove the completion sentinel so the user never sees the raw token. */
+function stripCompletionSentinel(s: string): string {
+  return s.replace(/<<\s*task[_\s-]*complete\s*>>/gi, '').replace(/[ \t]+$/gm, '').trimEnd()
+}
+
 function isTaskComplete(content: string): boolean {
+  if (COMPLETION_RE.test(content)) return true
   const lower = content.toLowerCase()
   return TASK_COMPLETION_MARKERS.some((marker) => lower.includes(marker))
 }
@@ -492,7 +533,7 @@ export function ChatPage() {
     currentMessages: Message[],
     iteration: number,
     signal?: AbortSignal
-  ): Promise<{ messages: Message[], shouldContinue: boolean, lastContent: string }> => {
+  ): Promise<{ messages: Message[], shouldContinue: boolean, lastContent: string, toolsUsed: number }> => {
     const assistantId = `assistant-${Date.now()}-${iteration}`
     const assistantMsg: Message = {
       id: assistantId,
@@ -518,7 +559,14 @@ export function ChatPage() {
     // Add auto-complete context to settings for this turn
     const autoSettings = autoComplete ? {
       ...settings,
-      systemPrompt: `${settings.systemPrompt}\n\nYou are in AUTO-COMPLETE MODE. Continue executing tools autonomously until the task is complete. Use multiple tools in sequence if needed. When you have achieved the objective, clearly state "task complete" or similar.`
+      systemPrompt: `${settings.systemPrompt}
+
+You are in AUTONOMOUS AUTO-RUN MODE. Keep working toward the user's objective across multiple turns WITHOUT waiting for further input:
+- Each turn, take the next concrete action: call the most useful tool, or analyze the latest tool output and decide the next step.
+- Chain tools based on prior results (e.g. discovered hosts → ports → services → vulnerabilities). Do not stop after a single tool.
+- Briefly say what you are doing and why before each action, and interpret results after.
+- Keep going until the objective is genuinely achieved or no further useful action exists.
+- ONLY when the objective is fully met, give a short final summary and then output the exact token ${COMPLETION_SENTINEL} on its own line. Do NOT output ${COMPLETION_SENTINEL} before you are truly done — that is the only way to end the run early.`
     } : settings
 
     try {
@@ -587,7 +635,7 @@ export function ChatPage() {
           const erroredMessages = updatedMessages.map((m) =>
             m.id === assistantId ? { ...m, content: errorContent } : m
           )
-          return { messages: erroredMessages, shouldContinue: false, lastContent: errorContent }
+          return { messages: erroredMessages, shouldContinue: false, lastContent: errorContent, toolsUsed: Object.keys(toolCallMap).length }
         } else if (event.type === 'usage') {
           addSessionUsage(event.usage)
         } else if (event.type === 'done') {
@@ -595,23 +643,28 @@ export function ChatPage() {
         }
       }
 
-      // Build final assistant message with all tool results
-      const finalMessages = updatedMessages.map((m) => {
-        if (m.id !== assistantId) return m
-        return { ...m, content: lastContent }
-      })
-
-      // Determine if we should continue
-      const toolsUsed = Object.keys(toolCallMap).length
+      // Detect completion on the RAW content (sentinel/markers), then strip the
+      // sentinel from what we display & store so the user never sees the token.
       const taskComplete = isTaskComplete(lastContent)
-      const reachedMaxIteration = iteration >= MAX_AUTO_ITERATIONS
-      const hasMoreWork = lastContent.toLowerCase().includes('next') ||
-                         lastContent.toLowerCase().includes('continu') ||
-                         lastContent.toLowerCase().includes('further') ||
-                         lastContent.toLowerCase().includes('addition')
-      const shouldContinue = autoComplete && !taskComplete && !reachedMaxIteration && (toolsUsed > 0 || hasMoreWork)
+      const displayContent = stripCompletionSentinel(lastContent)
+      if (displayContent !== lastContent) {
+        setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: displayContent } : m)))
+      }
+      const finalMessages = updatedMessages.map((m) =>
+        m.id === assistantId ? { ...m, content: displayContent } : m
+      )
 
-       return { messages: finalMessages, shouldContinue, lastContent }
+      // Keep the autonomous loop running until the model signals completion
+      // (the sentinel / a strong completion phrase) or we hit the iteration
+      // cap. We do NOT require a tool call to continue — a reasoning turn is
+      // valid progress — but a turn that produced literally nothing (no text
+      // AND no tools) ends the loop so it can't spin forever.
+      const toolsUsed = Object.keys(toolCallMap).length
+      const producedSomething = toolsUsed > 0 || displayContent.trim().length > 0
+      const reachedMaxIteration = iteration >= MAX_AUTO_ITERATIONS - 1
+      const shouldContinue = autoComplete && !taskComplete && !reachedMaxIteration && producedSomething
+
+      return { messages: finalMessages, shouldContinue, lastContent: displayContent, toolsUsed }
      } catch (err) {
        const msg = err instanceof Error ? err.message : String(err)
        const errorMsg = `**Error:** ${msg}`
@@ -623,7 +676,7 @@ export function ChatPage() {
        const erroredMessages = updatedMessages.map((m) =>
          m.id === assistantId ? { ...m, content: errorMsg } : m
        )
-       return { messages: erroredMessages, shouldContinue: false, lastContent: errorMsg }
+       return { messages: erroredMessages, shouldContinue: false, lastContent: errorMsg, toolsUsed: Object.keys(toolCallMap).length }
      }
    }, [settings, activeTools, autoComplete, addSessionUsage, refreshHexstrike, toaster])
 
@@ -684,9 +737,11 @@ export function ChatPage() {
 
     let currentMessages = [...messages, userMsg]
     let iteration = 0
+    let prevTurnContent = ''
 
     try {
-      // Main auto-completion loop
+      // Main autonomous loop — keep going until the model signals completion,
+      // the user stops, or we reach MAX_AUTO_ITERATIONS.
       while (!aborted && iteration < MAX_AUTO_ITERATIONS) {
         setAutoIteration(iteration + 1)
 
@@ -694,26 +749,33 @@ export function ChatPage() {
         currentMessages = result.messages
 
         if (!result.shouldContinue) {
-          if (autoComplete && iteration < MAX_AUTO_ITERATIONS - 1 && !isTaskComplete(result.lastContent)) {
-            setAutoStatus('Task appears complete - no more tools needed')
+          if (autoComplete && isTaskComplete(result.lastContent)) {
+            setAutoStatus('Objective complete.')
           }
           break
         }
 
-        // Add a continuation prompt for the next turn
+        // Stall guard: if a turn used no tools AND merely repeated the previous
+        // turn's text, the agent is stuck — stop instead of looping uselessly.
+        const trimmed = result.lastContent.trim()
+        if (result.toolsUsed === 0 && trimmed.length > 0 && trimmed === prevTurnContent.trim()) {
+          setAutoStatus('Stopped — agent made no new progress.')
+          break
+        }
+        prevTurnContent = result.lastContent
+
+        // Nudge the next turn toward a concrete action + the completion sentinel.
         const continuationMsg: Message = {
           id: `continuation-${Date.now()}`,
           role: 'user',
-          content: 'Continue with the next steps. Use more tools if needed to complete the task.',
+          content: `Continue working toward the objective. Take the next concrete action now (run the most useful tool, or analyze the latest output and proceed). If the objective is fully achieved, give a brief final summary and end with ${COMPLETION_SENTINEL}.`,
           timestamp: Date.now(),
         }
         currentMessages = [...currentMessages, continuationMsg]
         setMessages(currentMessages)
 
         iteration++
-
-        // Brief pause between iterations
-        await new Promise(resolve => setTimeout(resolve, 500))
+        await new Promise(resolve => setTimeout(resolve, 400))
       }
 
        // Auto-save chat after completion
@@ -940,9 +1002,11 @@ export function ChatPage() {
               <EmptyState onPrompt={(t) => setInput(t)} />
             ) : (
               <div className="max-w-4xl mx-auto px-3 sm:px-4 py-5">
-                {messages.map((msg) => (
-                  <MessageBubble key={msg.id} message={msg} />
-                ))}
+                {messages
+                  .filter((msg) => !msg.id.startsWith('continuation-'))
+                  .map((msg) => (
+                    <MessageBubble key={msg.id} message={msg} />
+                  ))}
                 {showTyping && (
                   <div className="flex justify-start mb-4">
                     <div className="rounded-2xl border border-[#2a2a3d]/80 bg-[#12121c]/90 backdrop-blur-sm px-3 py-2">
