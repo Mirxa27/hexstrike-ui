@@ -31,6 +31,7 @@ import type { UploadedFile } from '../fileAnalysis'
 import { useApp } from '../AppContext'
 import { normalizeHexstrikeBase, coerceHexstrikeUrlInput, hexstrikeToolTriggersCatalogRefresh } from '../api'
 import { streamChat } from '../chatEngine'
+import { selectRelevantTools, buildToolMenu, detectTargetType } from '../toolCatalog'
 import { ChatFileAttachments } from '../components/ChatFileAttachments'
 import { useToaster } from '../components/Toaster'
 import { useTTS } from '../hooks/useTTS'
@@ -557,20 +558,59 @@ export function ChatPage() {
     const toolCallMap: Record<string, ToolCall> = {}
 
     // Add auto-complete context to settings for this turn
-    const autoSettings = autoComplete ? {
-      ...settings,
-      systemPrompt: `${settings.systemPrompt}
+    const autoSettings = autoComplete ? (() => {
+      // Extract the target from the first user message for tool selection
+      const userMessages = currentMessages.filter((m) => m.role === 'user' && !m.id.startsWith('continuation-'))
+      const firstUserText = userMessages[0]?.content ?? ''
+      // Heuristic: pull the first word that looks like a target
+      const targetMatch = firstUserText.match(/\b(https?:\/\/\S+|[\w.-]+\.\w{2,}|\d{1,3}(?:\.\d{1,3}){3}|[\w._%+-]+@[\w.-]+\.\w{2,}|[a-zA-Z0-9_-]{3,30})\b/)
+      const guessedTarget = targetMatch?.[1] ?? ''
+      const guessedType = detectTargetType(guessedTarget || firstUserText)
 
-You are in AUTONOMOUS AUTO-RUN MODE. Keep working toward the user's objective across multiple turns WITHOUT waiting for further input:
-- Each turn, take the next concrete action: call the most useful tool, or analyze the latest tool output and decide the next step.
-- Chain tools based on prior results (e.g. discovered hosts → ports → services → vulnerabilities). Do not stop after a single tool.
-- Briefly say what you are doing and why before each action, and interpret results after.
-- Keep going until the objective is genuinely achieved or no further useful action exists.
-- ONLY when the objective is fully met, give a short final summary and then output the exact token ${COMPLETION_SENTINEL} on its own line. Do NOT output ${COMPLETION_SENTINEL} before you are truly done — that is the only way to end the run early.`
-    } : settings
+      const relevantTools = selectRelevantTools(activeTools, guessedTarget, firstUserText, 14)
+      const toolMenu = buildToolMenu(relevantTools, guessedTarget)
+      const toolNames = relevantTools.slice(0, 14).map((t) => t.name).join(', ')
+
+      return {
+        ...settings,
+        systemPrompt: `${settings.systemPrompt}
+
+────────────────────────────────────────────────────────────
+AUTONOMOUS AUTO-RUN MODE — ACTIVE
+────────────────────────────────────────────────────────────
+You are running autonomously. Your job is to CALL TOOLS — not write about calling them.
+
+TARGET TYPE DETECTED: ${guessedType.toUpperCase()} ("${guessedTarget || firstUserText.slice(0, 60)}")
+
+AVAILABLE TOOLS (use EXACTLY these function names — call them NOW):
+${toolMenu || toolNames}
+
+RULES:
+1. EVERY turn you MUST call at least one tool from the list above. Do not just describe what you will do.
+2. Call the tool whose output will most advance the objective right now. If in doubt, call the first one listed.
+3. After receiving tool output, briefly interpret the key findings (1-2 sentences), then call the NEXT logical tool immediately.
+4. Chain tools in sequence: passive/recon first, then active/deeper, then vulnerability checks.
+5. When the objective is fully complete, write a short summary and end with ${COMPLETION_SENTINEL} on its own line.
+6. Do NOT output ${COMPLETION_SENTINEL} until you have actually completed all meaningful steps.
+
+WRONG (do not do this): "I will now run nmap to scan the target..."
+CORRECT (do this): [call nmap function with target="<value>"] then interpret results then [call next tool]
+────────────────────────────────────────────────────────────`
+      }
+    })() : settings
+
+    // In auto-run mode, pass only the target-relevant tools (≤14) so the model
+    // isn't presented with 64 random tools it can't choose between. In manual
+    // mode, pass all active tools (full catalog).
+    const toolsForTurn = autoComplete ? (() => {
+      const userMessages = currentMessages.filter((m) => m.role === 'user' && !m.id.startsWith('continuation-'))
+      const firstUserText = userMessages[0]?.content ?? ''
+      const targetMatch = firstUserText.match(/\b(https?:\/\/\S+|[\w.-]+\.\w{2,}|\d{1,3}(?:\.\d{1,3}){3}|[\w._%+-]+@[\w.-]+\.\w{2,}|[a-zA-Z0-9_-]{3,30})\b/)
+      return selectRelevantTools(activeTools, targetMatch?.[1] ?? '', firstUserText, 14)
+    })() : activeTools
 
     try {
-    const gen = streamChat(autoSettings, currentMessages, activeTools, signal)
+    const gen = streamChat(autoSettings, currentMessages, toolsForTurn, signal)
 
       for await (const event of gen) {
         if (aborted) break
@@ -764,11 +804,15 @@ You are in AUTONOMOUS AUTO-RUN MODE. Keep working toward the user's objective ac
         }
         prevTurnContent = result.lastContent
 
-        // Nudge the next turn toward a concrete action + the completion sentinel.
+        // Result-aware continuation: tell the model what was just found so it
+        // knows what to do next, rather than a generic "continue" nudge.
+        const lastResult = result.lastContent.slice(0, 300).replace(/\n+/g, ' ')
         const continuationMsg: Message = {
           id: `continuation-${Date.now()}`,
           role: 'user',
-          content: `Continue working toward the objective. Take the next concrete action now (run the most useful tool, or analyze the latest output and proceed). If the objective is fully achieved, give a brief final summary and end with ${COMPLETION_SENTINEL}.`,
+          content: `Good. Call the next tool now — do not describe it, just call it. ` +
+            (lastResult ? `Last turn produced: "${lastResult.slice(0, 200)}". ` : '') +
+            `Continue the chain until the objective is fully complete, then output ${COMPLETION_SENTINEL}.`,
           timestamp: Date.now(),
         }
         currentMessages = [...currentMessages, continuationMsg]

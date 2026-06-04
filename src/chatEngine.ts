@@ -1,6 +1,7 @@
 import { Provider } from './types'
 import type { AISettings, HexstrikeTool, Message, ToolCall } from './types'
 import { executeHexstrikeTool, ensureLmStudioApiBase } from './api'
+import { enrichToolDescription, getToolPrimaryParam } from './toolCatalog'
 import {
   truncateForBudget,
   isReasoningModel,
@@ -31,20 +32,42 @@ function sanitizeTools(tools: HexstrikeTool[]): HexstrikeTool[] {
   return tools.filter((t) => VALID_TOOL_NAME.test(t.name)).slice(0, 64)
 }
 
+/**
+ * Per-tool parameter schema. Different tools need different primary fields:
+ * subfinder/amass → domain; gobuster/ffuf → url; sherlock → username;
+ * exiftool → filepath; nmap → target (host/IP). Using the right field name
+ * in the JSON schema signals to the LLM exactly what value to supply.
+ */
+function toolParams(toolName: string): {
+  properties: Record<string, { type: string; description: string }>
+  required: string[]
+} {
+  const primary = getToolPrimaryParam(toolName)
+  const paramDesc: Record<string, string> = {
+    target:   'Target host, IP address, CIDR, or domain',
+    domain:   'Apex domain (e.g. example.com) — no subdomain prefix',
+    url:      'Full URL including scheme (e.g. https://example.com)',
+    email:    'Email address to investigate',
+    username: 'Username or handle (no @ prefix)',
+    filepath: 'Absolute or relative path to the file on the backend server',
+    host:     'Hostname or IP address',
+  }
+  return {
+    properties: {
+      [primary]: { type: 'string', description: paramDesc[primary] ?? 'Primary target value' },
+      options: { type: 'string', description: 'Additional CLI flags or parameters (e.g. "-p 80,443" or "--silent")' },
+    },
+    required: [primary],
+  }
+}
+
 function buildOpenAITools(tools: HexstrikeTool[]) {
   return tools.map((t) => ({
     type: 'function',
     function: {
       name: t.name,
-      description: t.description,
-      parameters: {
-        type: 'object',
-        properties: {
-          target: { type: 'string', description: 'Target hostname, IP address, URL, or file path' },
-          options: { type: 'string', description: 'Additional tool options or parameters' },
-        },
-        required: ['target'],
-      },
+      description: enrichToolDescription(t),
+      parameters: { type: 'object', ...toolParams(t.name) },
     },
   }))
 }
@@ -52,32 +75,27 @@ function buildOpenAITools(tools: HexstrikeTool[]) {
 function buildAnthropicTools(tools: HexstrikeTool[]) {
   return tools.map((t) => ({
     name: t.name,
-    description: t.description,
-    input_schema: {
-      type: 'object',
-      properties: {
-        target: { type: 'string', description: 'Target hostname, IP address, URL, or file path' },
-        options: { type: 'string', description: 'Additional tool options or parameters' },
-      },
-      required: ['target'],
-    },
+    description: enrichToolDescription(t),
+    input_schema: { type: 'object', ...toolParams(t.name) },
   }))
 }
 
 function buildGoogleTools(tools: HexstrikeTool[]) {
   return [{
-    functionDeclarations: tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      parameters: {
-        type: 'OBJECT',
-        properties: {
-          target: { type: 'STRING', description: 'Target hostname, IP address, URL, or file path' },
-          options: { type: 'STRING', description: 'Additional tool options or parameters' },
+    functionDeclarations: tools.map((t) => {
+      const params = toolParams(t.name)
+      return {
+        name: t.name,
+        description: enrichToolDescription(t),
+        parameters: {
+          type: 'OBJECT',
+          properties: Object.fromEntries(
+            Object.entries(params.properties).map(([k, v]) => [k, { type: 'STRING', description: v.description }])
+          ),
+          required: params.required,
         },
-        required: ['target'],
-      },
-    })),
+      }
+    }),
   }]
 }
 
@@ -142,6 +160,12 @@ async function parseErrorBody(res: Response): Promise<string> {
 
 interface ToolCallArgs {
   target?: string
+  domain?: string
+  url?: string
+  email?: string
+  username?: string
+  filepath?: string
+  host?: string
   options?: string
   [key: string]: unknown
 }
@@ -300,11 +324,18 @@ async function* openAIStream(
         return { tc, callId, args, resultStr: `Skipped: tool "${tc.name}" failed too many times this session.` }
       }
 
+      // Resolve the target from whichever field the LLM used (target | domain |
+      // url | email | username | filepath | host) — the schema uses the right
+      // primary field for each tool, but we accept any of them as fallback.
+      const resolveTarget = (a: ToolCallArgs) =>
+        a.target ?? a.domain ?? a.url ?? a.email ?? a.username ?? a.filepath ?? a.host ?? ''
+
       try {
+        const targetValue = resolveTarget(args) as string
         const result = await executeHexstrikeTool(
           settings.hexstrikeUrl,
           tc.name,
-          args.target ?? '',
+          targetValue,
           args.options ? { raw: String(args.options) } : undefined
         )
         const raw = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
@@ -445,7 +476,8 @@ async function* anthropicStream(
       }
       try {
         const params = args.options ? { raw: String(args.options) } : undefined
-        const result = await executeHexstrikeTool(settings.hexstrikeUrl, tc.name, args.target ?? '', params)
+        const targetValue = (args.target ?? args.domain ?? args.url ?? args.email ?? args.username ?? args.filepath ?? args.host ?? '') as string
+        const result = await executeHexstrikeTool(settings.hexstrikeUrl, tc.name, targetValue, params)
         const raw = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
         const resultStr = truncateForBudget(raw, budget)
         failures.reset(tc.name)
@@ -566,7 +598,8 @@ async function* googleStream(
       }
       try {
         const params = fc.args.options ? { raw: String(fc.args.options) } : undefined
-        const result = await executeHexstrikeTool(settings.hexstrikeUrl, fc.name, String(fc.args.target ?? ''), params)
+        const fcTarget = String(fc.args.target ?? fc.args.domain ?? fc.args.url ?? fc.args.email ?? fc.args.username ?? fc.args.filepath ?? fc.args.host ?? '')
+        const result = await executeHexstrikeTool(settings.hexstrikeUrl, fc.name, fcTarget, params)
         const raw = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
         const resultStr = truncateForBudget(raw, budget)
         failures.reset(fc.name)
