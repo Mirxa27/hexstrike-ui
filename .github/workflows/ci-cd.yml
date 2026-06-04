@@ -111,10 +111,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Compute lowercase image ref
+        run: |
+          echo "IMAGE_REF=${{ env.REGISTRY }}/$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]'):latest" >> "$GITHUB_ENV"
+
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          image-ref: ${{ env.IMAGE_REF }}
           format: 'sarif'
           output: 'trivy-results.sarif'
 
