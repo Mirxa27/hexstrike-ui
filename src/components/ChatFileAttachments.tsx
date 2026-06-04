@@ -25,7 +25,7 @@ interface ChatFileAttachmentsProps {
   disabled?: boolean
 }
 
-const FILE_ICONS: Record<string, any> = {
+const FILE_ICONS: Record<string, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
   image: ImageIcon,
   document: FileText,
   executable: Package,
@@ -104,10 +104,11 @@ export function ChatFileAttachments({ attachments, onAdd, onRemove, disabled }: 
         runningTotal += file.size
       }
 
-      if (newFiles.length > 0) onAdd(newFiles)
-    } catch (err: any) {
-      toaster.error(err?.message ?? 'File upload failed')
-    } finally {
+       if (newFiles.length > 0) onAdd(newFiles)
+     } catch (err) {
+       const msg = err instanceof Error ? err.message : 'File upload failed'
+       toaster.error(msg)
+     } finally {
       setUploading(false)
       setProgress(null)
       if (fileInputRef.current) fileInputRef.current.value = ''
@@ -123,7 +124,7 @@ export function ChatFileAttachments({ attachments, onAdd, onRemove, disabled }: 
       {attachments.length > 0 && (
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2 text-[10px] text-[#6b7280]">
-            <Paperclip size={12} />
+            <Paperclip width={12} height={12} />
             <span>{attachments.length} file{attachments.length > 1 ? 's' : ''} attached</span>
             <span>•</span>
             <span>{sizeMB} MB</span>
@@ -146,7 +147,7 @@ export function ChatFileAttachments({ attachments, onAdd, onRemove, disabled }: 
               key={file.id}
               className="flex items-center gap-2 px-2 py-1.5 bg-[#0f0f1a] border border-[#1a1a2e] rounded-lg group"
             >
-              <Icon size={14} className="text-[#e63946]" />
+              <Icon width={14} height={14} className="text-[#e63946]" />
               <div className="flex-1 min-w-0">
                 <p className="text-[10px] font-medium text-[#e2e8f0] truncate max-w-[150px]">{file.name}</p>
                 <p className="text-[8px] text-[#6b7280]">{(file.size / 1024).toFixed(1)} KB</p>
@@ -155,7 +156,7 @@ export function ChatFileAttachments({ attachments, onAdd, onRemove, disabled }: 
                 onClick={() => onRemove(file.id)}
                 className="p-0.5 hover:bg-[#1a1a2e] rounded text-[#6b7280] hover:text-[#e63946] transition-colors opacity-0 group-hover:opacity-100"
               >
-                <X size={12} />
+                <X width={12} height={12} />
               </button>
             </div>
           )
@@ -176,7 +177,7 @@ export function ChatFileAttachments({ attachments, onAdd, onRemove, disabled }: 
           disabled={disabled || uploading}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1a1a2e] hover:bg-[#1a1a2e]/80 border border-[#1a1a2e] hover:border-[#e63946]/50 rounded text-[10px] text-[#94a3b8] hover:text-[#e63946] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          {uploading ? <Loader2 size={12} className="animate-spin" /> : <Paperclip size={12} />}
+          {uploading ? <Loader2 width={12} height={12} className="animate-spin" /> : <Paperclip width={12} height={12} />}
           {uploading
             ? `Uploading ${progress?.current ?? 0}/${progress?.total ?? 0}…`
             : 'Attach files'}

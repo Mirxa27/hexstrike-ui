@@ -33,6 +33,11 @@ services:
     environment:
       - NODE_ENV=production
     restart: unless-stopped
+    # Lets nginx reach a LM Studio / Ollama server running on the Docker host
+    # (for the same-origin /lmstudio proxy). Auto-provided on Docker Desktop;
+    # this entry adds it on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - hexstrike-network
     read_only: true
@@ -42,10 +47,11 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /var/cache/nginx:size=64M,mode=0755,uid=1001,gid=1001
+      - /var/run/nginx:size=8M,mode=0755,uid=1001,gid=1001
       - /var/run:size=8M,mode=0755,uid=1001,gid=1001
       - /tmp:size=16M,mode=1777
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -57,6 +63,14 @@ services:
   backend:
     profiles: ["backend"]
     image: ${HEXSTRIKE_BACKEND_IMAGE:-hexstrike-backend:latest}
+    # Build the backend image from the pinned upstream HexStrike server
+    # (github.com/0x4m4/hexstrike-ai). `docker compose --profile backend up
+    # --build` builds it; otherwise a pre-built ${HEXSTRIKE_BACKEND_IMAGE} is used.
+    build:
+      context: .
+      dockerfile: docker/hexstrike-backend.Dockerfile
+      args:
+        HEXSTRIKE_REF: ${HEXSTRIKE_REF:-9b8c780f324ce5145a322bfa23c98886f8424ba3}
     container_name: hexstrike-backend
     ports:
       - "${BACKEND_PORT:-8888}:8888"
@@ -79,6 +93,43 @@ services:
       retries: 3
       start_period: 15s
 
+  # ─── Free local LLM (Ollama) ───────────────────────────────────────────
+  # Gated behind the "llm" profile. Lets the whole stack run for FREE with no
+  # API keys: the browser UI talks to Ollama directly at localhost:11434
+  # (CORS opened via OLLAMA_ORIGINS). A small, tool-capable model is pulled on
+  # first start. Override the model with OLLAMA_MODEL (e.g. qwen2.5:3b,
+  # llama3.2:3b) for higher quality.
+  #     docker compose --profile llm up -d
+  # Then in the UI: Settings → Provider = Ollama → Fetch models → pick one.
+  ollama:
+    profiles: ["llm"]
+    image: ollama/ollama:latest
+    container_name: hexstrike-ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - hexstrike-network
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        echo "Pulling free model: ${OLLAMA_MODEL:-qwen2.5:1.5b}"
+        ollama pull ${OLLAMA_MODEL:-qwen2.5:1.5b} || echo "model pull failed (pull manually: docker compose exec ollama ollama pull <model>)"
+        wait
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
 networks:
   hexstrike-network:
     driver: bridge
@@ -86,3 +137,4 @@ networks:
 volumes:
   hexstrike-data:
   hexstrike-output:
+  ollama-data:

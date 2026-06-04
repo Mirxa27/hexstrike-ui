@@ -206,18 +206,17 @@ export function getFileAnalysisTools(file: UploadedFile, availableTools: Hexstri
   // Network analysis tools
   const tcpdump = availableTools.find(t => t.name.toLowerCase().includes('tcpdump'))
   const tshark = availableTools.find(t => t.name.toLowerCase().includes('tshark'))
-  void availableTools.find(t => t.name.toLowerCase().includes('wireshark')) // wireshark - available for future use
+  // wireshark - available for future use
 
   // Document analysis
   const oletools = availableTools.find(t => t.name.toLowerCase().includes('ole') || t.name.toLowerCase().includes('oledump'))
   const pdfid = availableTools.find(t => t.name.toLowerCase().includes('pdf'))
-  void availableTools.find(t => t.name.toLowerCase().includes('docx')) // docx - available for future use
+  // docx - available for future use
 
   // Executable analysis
-  void availableTools.find(t => t.name.toLowerCase().includes('strings')) // stringsTool - already defined above
   const objdump = availableTools.find(t => t.name.toLowerCase().includes('objdump'))
-  void availableTools.find(t => t.name.toLowerCase().includes('ghidra')) // ghidra - available for future use
-  void availableTools.find(t => t.name.toLowerCase().includes('r2') || t.name.toLowerCase().includes('radare')) // radare2 - available for future use
+  // ghidra - available for future use
+  // radare2 - available for future use
 
   switch (file.category) {
     case 'image':
@@ -478,7 +477,9 @@ export function parseToolOutput(toolName: string, output: string, _fileCategory:
   if (toolName.toLowerCase().includes('string')) {
     const urls = output.match(/https?:\/\/[^\s]+/g) || []
     const emails = output.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []
-    const ips = output.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || []
+    // Filter out structurally-invalid octets (e.g. 999.999.999.999) so the
+    // findings don't surface garbage as real network indicators.
+    const ips = (output.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || []).filter(isPlausibleIPv4)
 
     if (urls.length > 0) {
       findings.push({
@@ -568,6 +569,140 @@ export function parseToolOutput(toolName: string, output: string, _fileCategory:
   }
 
   return findings
+}
+
+// ─── Client-side forensic extraction ──────────────────────────────────────
+// The HexStrike backend has no file-upload endpoint, so browser-uploaded
+// bytes cannot be analysed server-side. These helpers perform real forensic
+// extraction in the browser (printable strings, network indicators, secrets,
+// magic-byte file typing) directly on the decoded file content.
+
+/** Reject IPv4 strings whose octets fall outside 0–255. */
+function isPlausibleIPv4(ip: string): boolean {
+  const parts = ip.split('.')
+  if (parts.length !== 4) return false
+  return parts.every((o) => {
+    if (!/^\d{1,3}$/.test(o)) return false
+    const n = Number(o)
+    return n >= 0 && n <= 255
+  })
+}
+
+function uniq<T>(arr: T[]): T[] {
+  return Array.from(new Set(arr))
+}
+
+/** Decode a `data:...;base64,XXXX` URL (or bare base64) to a latin1 byte string. */
+export function decodeBase64DataUrl(data: string): string {
+  if (!data) return ''
+  const comma = data.indexOf(',')
+  const isDataUrl = comma >= 0 && data.slice(0, comma).includes('base64')
+  const b64 = isDataUrl ? data.slice(comma + 1) : data
+  try {
+    if (typeof atob === 'function') return atob(b64)
+  } catch {
+    return ''
+  }
+  // Node/test fallback (no atob)
+  try {
+    type BufferLike = { from(input: string, enc: string): { toString(enc: string): string } }
+    const g = globalThis as unknown as { Buffer?: BufferLike }
+    if (g.Buffer) return g.Buffer.from(b64, 'base64').toString('latin1')
+  } catch {
+    /* ignore */
+  }
+  return ''
+}
+
+/** Extract runs of printable ASCII (>= `min` chars) — the classic `strings`. */
+export function extractPrintableStrings(binary: string, min = 4): string[] {
+  if (!binary) return []
+  const re = new RegExp(`[\\x20-\\x7e]{${min},}`, 'g')
+  return binary.match(re) || []
+}
+
+const MAGIC_SIGNATURES: Array<{ label: string; mime: string; bytes: number[] }> = [
+  { label: 'PNG image', mime: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] },
+  { label: 'JPEG image', mime: 'image/jpeg', bytes: [0xff, 0xd8, 0xff] },
+  { label: 'GIF image', mime: 'image/gif', bytes: [0x47, 0x49, 0x46, 0x38] },
+  { label: 'PDF document', mime: 'application/pdf', bytes: [0x25, 0x50, 0x44, 0x46] },
+  { label: 'ZIP / Office archive', mime: 'application/zip', bytes: [0x50, 0x4b, 0x03, 0x04] },
+  { label: 'ELF executable', mime: 'application/x-elf', bytes: [0x7f, 0x45, 0x4c, 0x46] },
+  { label: 'Windows PE executable', mime: 'application/x-dosexec', bytes: [0x4d, 0x5a] },
+  { label: 'GZIP archive', mime: 'application/gzip', bytes: [0x1f, 0x8b] },
+]
+
+function detectMagicType(binary: string): { label: string; mime: string } | null {
+  for (const sig of MAGIC_SIGNATURES) {
+    if (sig.bytes.every((b, i) => binary.charCodeAt(i) === b)) {
+      return { label: sig.label, mime: sig.mime }
+    }
+  }
+  return null
+}
+
+function hexPreview(binary: string, n = 8): string {
+  const out: string[] = []
+  for (let i = 0; i < Math.min(n, binary.length); i++) {
+    out.push(binary.charCodeAt(i).toString(16).padStart(2, '0'))
+  }
+  return out.join(' ')
+}
+
+/**
+ * Run a real, self-contained forensic pass over an uploaded file entirely in
+ * the browser. Returns findings + extracted indicators + metadata.
+ */
+export function analyzeFileClientSide(file: UploadedFile): {
+  findings: FileFinding[]
+  extractedData: ExtractedData
+  metadata: FileMetadata
+} {
+  const metadata: FileMetadata = {
+    basic: {
+      filename: file.name,
+      size: `${(file.size / 1024).toFixed(2)} KB`,
+      mimeType: file.type || 'unknown',
+      category: file.category,
+    },
+  }
+
+  const binary = decodeBase64DataUrl(file.data)
+  const strings = extractPrintableStrings(binary, 5)
+  const text = strings.join('\n')
+
+  // Reuse the strings-output parser for URL/email/IP/secret findings.
+  const findings: FileFinding[] = parseToolOutput('strings_local', text, file.category)
+
+  // Magic-byte file typing (flags extension/content mismatches).
+  const magic = detectMagicType(binary)
+  if (magic) {
+    const claimed = (file.type || '').toLowerCase()
+    const mismatch = claimed && !claimed.includes(magic.mime.split('/')[1] ?? '###') && magic.mime !== claimed
+    findings.push({
+      category: 'File Type',
+      severity: mismatch ? 'medium' : 'info',
+      title: mismatch ? `Content/type mismatch: ${magic.label}` : `File signature: ${magic.label}`,
+      description: mismatch
+        ? `Declared MIME "${file.type}" but magic bytes indicate ${magic.label} (${magic.mime}).`
+        : `Magic bytes confirm ${magic.label} (${magic.mime}).`,
+      evidence: [`magic: ${hexPreview(binary)}`],
+      tools: ['client-magic'],
+    })
+  }
+
+  const urls = uniq(text.match(/https?:\/\/[^\s"'<>]+/g) || []).slice(0, 50)
+  const emails = uniq((text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []).map((e) => e.toLowerCase())).slice(0, 50)
+  const ips = uniq((text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || []).filter(isPlausibleIPv4)).slice(0, 50)
+
+  const extractedData: ExtractedData = {
+    strings: strings.slice(0, 300),
+    urls,
+    emails,
+    ips,
+  }
+
+  return { findings, extractedData, metadata }
 }
 
 // Generate narrative report for file analysis

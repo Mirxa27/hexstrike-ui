@@ -2,6 +2,48 @@
 import type { HexstrikeTool, ToolExecution, AISettings } from './types'
 import { planWithLLM, type LLMScanPlan } from './agent'
 
+/** Matched case-insensitively against catalog tool names to classify OSINT tooling. */
+const OSINT_NAME_HINTS = [
+  // Search / API engines
+  'shodan', 'censys', 'fullhunt', 'zoomeye', 'binaryedge', 'intelx',
+  'securitytrails', 'criminalip', 'hunterio', 'haveibeenpwned',
+  // Recon frameworks
+  'theharvester', 'subfinder', 'amass', 'whois', 'dnsrecon', 'nslookup',
+  'dnsenum', 'assetfinder', 'findomain', 'shuffledns', 'dnsx',
+  // Email / breach
+  'holehe', 'h8mail', 'hibp', 'emailrep', 'emailfinder', 'skypebuster',
+  // URL discovery
+  'wayback', 'gau', 'getallurls', 'crt', 'fierce',
+  // Git / secrets
+  'metagoofil', 'trufflehog', 'gitleaks', 'gitrob', 'gitscanner',
+  // Social / username discovery
+  'sherlock', 'maigret', 'social-analyzer', 'social_analyzer', 'whatsmyname',
+  'userrecon', 'blackbird', 'snoop', 'osintgram', 'toutatis', 'ghunt',
+  'photon', 'sn0int', 'sociolis', 'socialscan', 'inky',
+  // Frameworks
+  'spiderfoot', 'reconng', 'pagodo',
+] as const
+
+/** Username / social presence discovery — explicit fragments to limit false positives. */
+function matchesSocialMediaCatalogTool(name: string): boolean {
+  const n = name.toLowerCase()
+  return (
+    n.includes('sherlock') ||
+    n.includes('maigret') ||
+    n.includes('whatsmyname') ||
+    n.includes('userrecon') ||
+    n.includes('blackbird') ||
+    n.includes('osintgram') ||
+    n.includes('toutatis') ||
+    n.includes('ghunt') ||
+    n.includes('snoop') ||
+    n.includes('sociolis') ||
+    n.includes('socialscan') ||
+    n.includes('inky') ||
+    (n.includes('social') && (n.includes('analyzer') || n.includes('analyser')))
+  )
+}
+
 export interface AIRecommendation {
   tool: HexstrikeTool
   reason: string
@@ -67,28 +109,30 @@ export function generateScanPlan(target: string, availableTools: HexstrikeTool[]
   const recommendations: AIRecommendation[] = []
 
   // Categorize tools
-  const osintTools = availableTools.filter(t =>
-    t.category.toLowerCase().includes('osint') ||
-    ['shodan', 'theharvester', 'subfinder', 'amass', 'whois', 'dnsrecon', 'nslookup'].some(k => t.name.toLowerCase().includes(k))
+  const osintTools = availableTools.filter(
+    (t) =>
+      t.category.toLowerCase().includes('osint') ||
+      OSINT_NAME_HINTS.some((k) => t.name.toLowerCase().includes(k))
   )
+
+  const socialMediaTools = availableTools.filter((t) => matchesSocialMediaCatalogTool(t.name))
 
   const reconTools = availableTools.filter(t =>
     t.category.toLowerCase().includes('reconnaissance') ||
-    ['nmap', 'masscan', 'rustscan', 'httpx', 'assetfinder'].some(k => t.name.toLowerCase().includes(k))
+    ['nmap', 'masscan', 'rustscan', 'httpx', 'assetfinder', 'naabu', 'autorecon', 'enum4linux', 'netexec', 'crackmapexec', 'arp-scan'].some(k => t.name.toLowerCase().includes(k))
   )
 
   const webTools = availableTools.filter(t =>
     t.category.toLowerCase().includes('web') ||
-    ['nuclei', 'gobuster', 'dirsearch', 'sqlmap', 'dalfox'].some(k => t.name.toLowerCase().includes(k))
+    ['nuclei', 'gobuster', 'dirsearch', 'sqlmap', 'dalfox', 'ffuf', 'feroxbuster', 'katana', 'arjun', 'nikto', 'wpscan', 'httpx'].some(k => t.name.toLowerCase().includes(k))
   )
 
   const vulnTools = availableTools.filter(t =>
     t.category.toLowerCase().includes('vuln') ||
-    ['nikto', 'wpscan', 'joomscan', 'smb-vuln'].some(k => t.name.toLowerCase().includes(k))
+    ['nikto', 'wpscan', 'joomscan', 'smb-vuln', 'zaproxy', 'zap', 'burp', 'nessus', 'openvas'].some(k => t.name.toLowerCase().includes(k))
   )
 
-  // Generate recommendations based on target type (vulnTools used in extended scanning)
-  void vulnTools // Available for future use
+  // Generate recommendations based on target type
   switch (targetType) {
     case 'domain':
       // Domain reconnaissance flow
@@ -123,6 +167,98 @@ export function generateScanPlan(target: string, availableTools: HexstrikeTool[]
         })
       }
 
+      const harvesterDomain = osintTools.find(t => t.name.toLowerCase().includes('theharvester'))
+      if (harvesterDomain) {
+        recommendations.push({
+          tool: harvesterDomain,
+          reason: 'Harvest emails, hosts, and subdomains from search engines and public data sources',
+          priority: 'high',
+          estimatedTime: '2-6m',
+        })
+      }
+
+      const assetfinderTool = reconTools.find(t => t.name.toLowerCase().includes('assetfinder'))
+      if (assetfinderTool && (!subdomainTool || assetfinderTool.name !== subdomainTool.name)) {
+        recommendations.push({
+          tool: assetfinderTool,
+          reason: 'Passive subdomain discovery from certificate and passive DNS sources',
+          priority: 'high',
+          estimatedTime: '1-3m',
+        })
+      }
+
+      const crtTool = osintTools.find(
+        t => t.name.toLowerCase().includes('crt') && !t.name.toLowerCase().includes('nuclei')
+      )
+      if (crtTool) {
+        recommendations.push({
+          tool: crtTool,
+          reason: 'Map infrastructure and hostnames from certificate transparency logs',
+          priority: 'high',
+          estimatedTime: '1-2m',
+        })
+      }
+
+      const fierceTool = osintTools.find(t => t.name.toLowerCase().includes('fierce'))
+      if (fierceTool) {
+        recommendations.push({
+          tool: fierceTool,
+          reason: 'DNS brute force and zone transfer checks for non-obvious hostnames',
+          priority: 'medium',
+          estimatedTime: '3-8m',
+        })
+      }
+
+      const metagoofilTool = osintTools.find(t => t.name.toLowerCase().includes('metagoofil'))
+      if (metagoofilTool) {
+        recommendations.push({
+          tool: metagoofilTool,
+          reason: 'Discover indexed documents and metadata that may leak users or internal paths',
+          priority: 'medium',
+          estimatedTime: '3-10m',
+        })
+      }
+
+      const gauTool = osintTools.find(
+        t =>
+          t.name.toLowerCase().includes('gau') ||
+          t.name.toLowerCase().includes('getallurls')
+      )
+      if (gauTool) {
+        recommendations.push({
+          tool: gauTool,
+          reason: 'Enumerate historical URLs from passive web archives for forgotten endpoints',
+          priority: 'medium',
+          estimatedTime: '2-4m',
+          dependsOn: subdomainTool ? [subdomainTool.name] : [],
+        })
+      }
+
+      const waybackTool = osintTools.find(
+        t =>
+          t.name.toLowerCase().includes('wayback') ||
+          t.name.toLowerCase().includes('waybackurls')
+      )
+      if (waybackTool && (!gauTool || waybackTool.name !== gauTool.name)) {
+        recommendations.push({
+          tool: waybackTool,
+          reason: 'Recover archived paths and content from the Wayback Machine',
+          priority: 'medium',
+          estimatedTime: '2-5m',
+          dependsOn: subdomainTool ? [subdomainTool.name] : [],
+        })
+      }
+
+      const dnstwistTool = osintTools.find(t => t.name.toLowerCase().includes('dnstwist'))
+      if (dnstwistTool) {
+        recommendations.push({
+          tool: dnstwistTool,
+          reason: 'Find typo-squat and lookalike domains used for phishing or brand abuse',
+          priority: 'medium',
+          estimatedTime: '2-4m',
+        })
+      }
+
       const httpxTool = reconTools.find(t => t.name.toLowerCase().includes('httpx'))
       if (httpxTool) {
         recommendations.push({
@@ -154,6 +290,38 @@ export function generateScanPlan(target: string, availableTools: HexstrikeTool[]
           estimatedTime: '1m',
         })
       }
+
+      const censysTool = osintTools.find(t => t.name.toLowerCase().includes('censys'))
+      if (censysTool) {
+        recommendations.push({
+          tool: censysTool,
+          reason: 'Cross-check certificate and host exposure via internet-wide telemetry',
+          priority: 'medium',
+          estimatedTime: '1-2m',
+        })
+      }
+
+      const ffufDomain = webTools.find(t => t.name.toLowerCase().includes('ffuf'))
+      if (ffufDomain && httpxTool) {
+        recommendations.push({
+          tool: ffufDomain,
+          reason: 'Fuzz directories and VHosts on live hosts once endpoints are confirmed',
+          priority: 'medium',
+          estimatedTime: '3-8m',
+          dependsOn: [httpxTool.name],
+        })
+      }
+
+      const feroxDomain = webTools.find(t => t.name.toLowerCase().includes('feroxbuster'))
+      if (feroxDomain && httpxTool && (!ffufDomain || feroxDomain.name !== ffufDomain.name)) {
+        recommendations.push({
+          tool: feroxDomain,
+          reason: 'Recursive content discovery where deep crawling is needed',
+          priority: 'medium',
+          estimatedTime: '5-12m',
+          dependsOn: [httpxTool.name],
+        })
+      }
       break
 
     case 'ip':
@@ -175,6 +343,29 @@ export function generateScanPlan(target: string, availableTools: HexstrikeTool[]
           reason: 'Fast port scan to discover all open ports',
           priority: 'high',
           estimatedTime: '2-5m',
+        })
+      }
+
+      const rustscanTool = reconTools.find(t => t.name.toLowerCase().includes('rustscan'))
+      if (rustscanTool) {
+        recommendations.push({
+          tool: rustscanTool,
+          reason: 'High-speed port discovery to prioritize deeper service enumeration',
+          priority: 'high',
+          estimatedTime: '1-3m',
+        })
+      }
+
+      const tlsProbe = availableTools.find(t =>
+        ['sslscan', 'testssl', 'sslyze'].some(k => t.name.toLowerCase().includes(k))
+      )
+      if (tlsProbe) {
+        recommendations.push({
+          tool: tlsProbe,
+          reason: 'Evaluate TLS versions, ciphers, and certificate issues on HTTPS services',
+          priority: 'medium',
+          estimatedTime: '2-4m',
+          dependsOn: nmapTool ? [nmapTool.name] : [],
         })
       }
 
@@ -220,10 +411,80 @@ export function generateScanPlan(target: string, availableTools: HexstrikeTool[]
           estimatedTime: '2-3m',
         })
       }
+
+      const ffufUrl = webTools.find(t => t.name.toLowerCase().includes('ffuf'))
+      if (ffufUrl) {
+        recommendations.push({
+          tool: ffufUrl,
+          reason: 'Fuzz endpoints, parameters, and virtual hosts at high throughput',
+          priority: 'high',
+          estimatedTime: '3-8m',
+        })
+      }
+
+      const feroxUrl = webTools.find(t => t.name.toLowerCase().includes('feroxbuster'))
+      if (feroxUrl && (!ffufUrl || feroxUrl.name !== ffufUrl.name)) {
+        recommendations.push({
+          tool: feroxUrl,
+          reason: 'Breadth-first directory brute force with recursion where useful',
+          priority: 'high',
+          estimatedTime: '5-12m',
+        })
+      }
+
+      const dalfoxUrl = webTools.find(t => t.name.toLowerCase().includes('dalfox'))
+      if (dalfoxUrl) {
+        recommendations.push({
+          tool: dalfoxUrl,
+          reason: 'Target XSS validation once inputs/parameters are identified',
+          priority: 'high',
+          estimatedTime: '3-6m',
+        })
+      }
+
+      const arjunTool = webTools.find(t => t.name.toLowerCase().includes('arjun'))
+      if (arjunTool) {
+        recommendations.push({
+          tool: arjunTool,
+          reason: 'Discover hidden HTTP parameters before injection-focused testing',
+          priority: 'medium',
+          estimatedTime: '2-5m',
+        })
+      }
+
+      const zapTool = vulnTools.find(t => t.name.toLowerCase().includes('zap'))
+      if (zapTool) {
+        recommendations.push({
+          tool: zapTool,
+          reason: 'Baseline automated DAST-style checks when a full spider scope is appropriate',
+          priority: 'medium',
+          estimatedTime: '10-25m',
+        })
+      }
       break
 
     case 'email':
       // Email OSINT
+      const holeheEmailTool = osintTools.find(t => t.name.toLowerCase().includes('holehe'))
+      if (holeheEmailTool) {
+        recommendations.push({
+          tool: holeheEmailTool,
+          reason: 'Discover which third-party services this email registered (account footprint)',
+          priority: 'critical',
+          estimatedTime: '2-4m',
+        })
+      }
+
+      const h8mailTool = osintTools.find(t => t.name.toLowerCase().includes('h8mail'))
+      if (h8mailTool) {
+        recommendations.push({
+          tool: h8mailTool,
+          reason: 'Correlate the address with breaches and combo lists where enabled',
+          priority: 'high',
+          estimatedTime: '2-5m',
+        })
+      }
+
       const harvesterTool = osintTools.find(t => t.name.toLowerCase().includes('theharvester'))
       if (harvesterTool) {
         recommendations.push({
@@ -234,24 +495,50 @@ export function generateScanPlan(target: string, availableTools: HexstrikeTool[]
         })
       }
 
-      const emailTool = osintTools.find(t => t.name.toLowerCase().includes('email'))
+      const hibpTool = osintTools.find(t => t.name.toLowerCase().includes('hibp'))
+      if (hibpTool) {
+        recommendations.push({
+          tool: hibpTool,
+          reason: 'Check known public breach disclosures for this address',
+          priority: 'high',
+          estimatedTime: '30s',
+        })
+      }
+
+      const emailRepTool = osintTools.find(t => t.name.toLowerCase().includes('emailrep'))
+      if (emailRepTool) {
+        recommendations.push({
+          tool: emailRepTool,
+          reason: 'Reputation, disposable-mail hints, and metadata for deliverability assessment',
+          priority: 'medium',
+          estimatedTime: '30s',
+        })
+      }
+
+      const emailTool = osintTools.find(
+        t =>
+          t.name.toLowerCase().includes('email') &&
+          !t.name.toLowerCase().includes('holehe') &&
+          !t.name.toLowerCase().includes('h8mail') &&
+          !t.name.toLowerCase().includes('emailrep')
+      )
       if (emailTool) {
         recommendations.push({
           tool: emailTool,
-          reason: 'Check email breach databases and validation',
-          priority: 'high',
+          reason: 'Additional email validation or breach checks available in the catalog',
+          priority: 'medium',
           estimatedTime: '1-2m',
         })
       }
       break
 
     case 'username':
-      // Username OSINT
+      // Username / social OSINT
       const sherlockTool = osintTools.find(t => t.name.toLowerCase().includes('sherlock'))
       if (sherlockTool) {
         recommendations.push({
           tool: sherlockTool,
-          reason: 'Search for username across social media platforms',
+          reason: 'Search for this handle across many social and content platforms',
           priority: 'critical',
           estimatedTime: '2-3m',
         })
@@ -261,9 +548,63 @@ export function generateScanPlan(target: string, availableTools: HexstrikeTool[]
       if (maigretTool) {
         recommendations.push({
           tool: maigretTool,
-          reason: 'Find profiles by username across hundreds of sites',
+          reason: 'Broad multi-site username correlation with rich profile metadata',
           priority: 'high',
           estimatedTime: '3-5m',
+        })
+      }
+
+      const socialAnalyzerTool = socialMediaTools.find(
+        t =>
+          t.name.toLowerCase().includes('analyzer') ||
+          t.name.toLowerCase().includes('analyser')
+      )
+      if (socialAnalyzerTool) {
+        recommendations.push({
+          tool: socialAnalyzerTool,
+          reason: 'Structured cross-platform social footprint and NLP-style profile analysis',
+          priority: 'high',
+          estimatedTime: '3-8m',
+        })
+      }
+
+      const whatsmynameTool = osintTools.find(t => t.name.toLowerCase().includes('whatsmyname'))
+      if (whatsmynameTool) {
+        recommendations.push({
+          tool: whatsmynameTool,
+          reason: 'Fast multi-site username existence checks',
+          priority: 'high',
+          estimatedTime: '2-4m',
+        })
+      }
+
+      const userreconTool = osintTools.find(t => t.name.toLowerCase().includes('userrecon'))
+      if (userreconTool) {
+        recommendations.push({
+          tool: userreconTool,
+          reason: 'Interactive username reconnaissance workflow across platforms',
+          priority: 'medium',
+          estimatedTime: '4-8m',
+        })
+      }
+
+      const blackbirdTool = osintTools.find(t => t.name.toLowerCase().includes('blackbird'))
+      if (blackbirdTool) {
+        recommendations.push({
+          tool: blackbirdTool,
+          reason: 'Correlate usernames and emails across sites with a focused OSINT lens',
+          priority: 'medium',
+          estimatedTime: '3-6m',
+        })
+      }
+
+      const osintgramTool = osintTools.find(t => t.name.toLowerCase().includes('osintgram'))
+      if (osintgramTool) {
+        recommendations.push({
+          tool: osintgramTool,
+          reason: 'Instagram-focused enumeration when the target maps to that platform',
+          priority: 'medium',
+          estimatedTime: '5-12m',
         })
       }
       break
@@ -369,8 +710,19 @@ export function analyzeResults(executions: ToolExecution[], target: string): AIA
     byTool.get(exec.toolName)!.push(exec)
   }
 
+  // Match executions by tool-name keyword (case-insensitive, substring) so
+  // the analysis works regardless of the backend's exact tool naming
+  // (e.g. `nuclei` vs `nuclei_templates`, `httpx` vs `httpx_probing`).
+  const findExecs = (keywords: string[]): ToolExecution[] | undefined => {
+    for (const [name, execs] of byTool) {
+      const n = name.toLowerCase()
+      if (keywords.some((k) => n.includes(k))) return execs
+    }
+    return undefined
+  }
+
   // Analyze subdomain findings
-  const subdomainExecs = byTool.get('subfinder_enum') || byTool.get('amass_enum')
+  const subdomainExecs = findExecs(['subfinder', 'amass', 'assetfinder', 'findomain', 'sublist3r', 'subdomain'])
   if (subdomainExecs?.length) {
     const result = subdomainExecs[subdomainExecs.length - 1].result || ''
     const subdomainMatches = result.match(/[\w.-]+\.\w{2,}/g) || []
@@ -387,7 +739,7 @@ export function analyzeResults(executions: ToolExecution[], target: string): AIA
   }
 
   // Analyze port scan results
-  const nmapExecs = byTool.get('nmap_scan') || byTool.get('masscan_scan')
+  const nmapExecs = findExecs(['nmap', 'masscan', 'rustscan', 'naabu'])
   if (nmapExecs?.length) {
     const result = nmapExecs[nmapExecs.length - 1].result || ''
     const openPorts = result.match(/(\d+)\/(tcp|udp)\s+open/g) || []
@@ -403,7 +755,7 @@ export function analyzeResults(executions: ToolExecution[], target: string): AIA
   }
 
   // Analyze vulnerability findings
-  const nucleiExecs = byTool.get('nuclei_templates')
+  const nucleiExecs = findExecs(['nuclei'])
   if (nucleiExecs?.length) {
     const result = nucleiExecs[nucleiExecs.length - 1].result || ''
     if (result.includes('CRITICAL') || result.includes('HIGH')) {
@@ -418,7 +770,7 @@ export function analyzeResults(executions: ToolExecution[], target: string): AIA
   }
 
   // Analyze web findings
-  const httpxExecs = byTool.get('httpx_probing')
+  const httpxExecs = findExecs(['httpx', 'httprobe', 'http_prob'])
   if (httpxExecs?.length) {
     const result = httpxExecs[httpxExecs.length - 1].result || ''
     const urlMatches = result.match(/https?:\/\/[^\s]+/g) || []
@@ -435,7 +787,7 @@ export function analyzeResults(executions: ToolExecution[], target: string): AIA
   }
 
   // Analyze Shodan findings
-  const shodanExecs = byTool.get('shodan_api')
+  const shodanExecs = findExecs(['shodan'])
   if (shodanExecs?.length) {
     const result = shodanExecs[shodanExecs.length - 1].result || ''
     if (result && result.length > 100) {

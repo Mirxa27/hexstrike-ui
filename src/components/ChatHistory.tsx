@@ -10,7 +10,7 @@ import {
   X,
   Clock,
 } from 'lucide-react'
-import type { Message } from '../types'
+import type { Message, ChatSession } from '../types'
 import { useApp } from '../AppContext'
 import { useToaster } from './Toaster'
 
@@ -47,17 +47,17 @@ export function ChatHistorySidebar({ open, onClose, onLoadChat, currentMessages 
     }
   }, [currentMessages, saveCurrentChat])
 
-  const filteredHistory = chatHistory.filter((chat: any) => {
-    const query = searchQuery.toLowerCase()
-    return (
-      chat.title?.toLowerCase().includes(query) ||
-      chat.messages?.some((m: Message) => m.content.toLowerCase().includes(query))
-    )
-  })
+   const filteredHistory = chatHistory.filter((chat: ChatSession) => {
+     const query = searchQuery.toLowerCase()
+     return (
+       (chat.title?.toLowerCase().includes(query) ?? false) ||
+       chat.messages?.some((m: Message) => (m.content ?? '').toLowerCase().includes(query))
+     )
+   })
 
-  const handleLoadChat = (chat: any) => {
-    setCurrentChatId(chat.id)
-    onLoadChat(chat.messages)
+   const handleLoadChat = (chat: ChatSession) => {
+     setCurrentChatId(chat.id)
+     onLoadChat(chat.messages)
     onClose()
   }
 
@@ -102,15 +102,16 @@ export function ChatHistorySidebar({ open, onClose, onLoadChat, currentMessages 
     reader.onload = (ev) => {
       const content = ev.target?.result as string
       try {
-        const result = importChats(content)
-        if (result.success) {
-          toaster.success(`Imported ${result.imported} chat${result.imported === 1 ? '' : 's'}`)
-        } else {
-          toaster.error('Failed to import chats — file may be corrupt or in an unsupported format')
-        }
-      } catch (err: any) {
-        toaster.error(`Import failed: ${err?.message ?? 'unknown error'}`)
-      } finally {
+         const result = importChats(content)
+         if (result.success) {
+           toaster.success(`Imported ${result.imported} chat${result.imported === 1 ? '' : 's'}`)
+         } else {
+           toaster.error('Failed to import chats — file may be corrupt or in an unsupported format')
+         }
+       } catch (err) {
+         const msg = err instanceof Error ? err.message : 'unknown error'
+         toaster.error(`Import failed: ${msg}`)
+       } finally {
         if (fileInputRef.current) fileInputRef.current.value = ''
       }
     }
@@ -227,12 +228,12 @@ export function ChatHistorySidebar({ open, onClose, onLoadChat, currentMessages 
                   {searchQuery ? 'No chats found' : 'No chat history yet'}
                 </p>
               </div>
-            ) : (
-              <div className="space-y-2">
-                {filteredHistory.map((chat: any) => (
-                  <div
-                    key={chat.id}
-                    onClick={() => handleLoadChat(chat)}
+             ) : (
+               <div className="space-y-2">
+                 {filteredHistory.map((chat: ChatSession) => (
+                   <div
+                     key={chat.id}
+                     onClick={() => handleLoadChat(chat)}
                     className={`p-3 rounded-lg cursor-pointer transition-colors group ${
                       currentChatId === chat.id
                         ? 'bg-[#e63946]/10 border border-[#e63946]/30'

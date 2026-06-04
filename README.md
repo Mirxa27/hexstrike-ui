@@ -40,13 +40,23 @@ start.bat up --with-backend
 
 Then open your browser and visit: **http://localhost:4173**
 
-> ⚠️ The HexStrike backend container is **optional** and lives in a separate
-> repository — it's gated behind a Compose `backend` profile so the default
-> `up` works on a fresh clone with no extra setup. If you don't start the
-> backend you can still talk to LLM providers and configure tools, but
-> tool execution will fail until you point Settings → HexStrike URL at a
+> ⚠️ The HexStrike backend is **optional** and gated behind a Compose
+> `backend` profile, so the default `up` works on a fresh clone with no extra
+> setup. When you do want real tool execution, this repo can build the backend
+> for you — `docker/hexstrike-backend.Dockerfile` containers the pinned
+> upstream [`0x4m4/hexstrike-ai`](https://github.com/0x4m4/hexstrike-ai) server
+> with a curated set of real CLI tools (nmap, exiftool, binwalk, tcpdump,
+> strings/objdump, file, dig, whois). Build + run the whole stack with:
+>
+> ```bash
+> docker compose --profile backend up -d --build
+> ```
+>
+> Without the backend you can still talk to LLM providers and configure tools,
+> but tool execution will fail until you point Settings → HexStrike URL at a
 > reachable backend (defaults to `http://hexstrike-backend:8888` inside the
-> compose network and is proxied at `/api/` by nginx).
+> compose network and is proxied at `/api/` by nginx). Install more tools at
+> runtime from the UI via the **HexStrike System → install packages** tool.
 
 ### Option 2: Docker Compose directly
 
@@ -54,9 +64,35 @@ Then open your browser and visit: **http://localhost:4173**
 # Frontend only
 docker compose up -d
 
-# Frontend + backend
-docker compose --profile backend up -d
+# Frontend + a lean backend (nmap, whois, dig, exiftool, binwalk, tcpdump, …)
+docker compose --profile backend up -d --build
 ```
+
+### Option 2b: Full toolset + advanced OSINT (face / person search)
+
+For a comprehensive backend (~44 tools out of the box), build the full image and
+point Compose at it:
+
+```bash
+# Build the comprehensive image (large; Go recon suite + people-search + face recognition)
+docker build -f docker/hexstrike-backend.full.Dockerfile -t hexstrike-backend:full .
+
+# Run the stack against it
+HEXSTRIKE_BACKEND_IMAGE=hexstrike-backend:full docker compose --profile backend up -d
+```
+
+This adds:
+
+- **Recon (Go):** subfinder, httpx, nuclei, naabu, dnsx, katana, ffuf, gobuster, assetfinder, gau, waybackurls, dalfox, amass
+- **People search:** sherlock, maigret, holehe, socialscan, social-analyzer, h8mail, ghunt, dnstwist
+- **Face / image OSINT:** local `face_recognition` (dlib) + the `osint-image-search` helper
+  - `osint-image-search face-detect <img>` · `face-compare <a> <b>` · `face-encode <img>`
+  - `osint-image-search reverse <image-url>` → reverse-image search URLs (Google Lens, Yandex, Bing, TinEye, PimEyes/FaceCheck)
+
+> Web-wide automated **face** search engines (PimEyes, FaceCheck) are paid/closed —
+> the helper emits the correct query URLs for them and performs real, offline
+> face detection/matching locally. Use only on subjects/targets you are
+> authorized to investigate.
 
 ### Option 3: Manual Docker Build
 
@@ -71,12 +107,16 @@ docker run -p 4173:8080 hexstrike-ui
 ### Option 4: Development
 
 ```bash
-# Install dependencies
-npm install
+# Install dependencies (use npm ci for a lockfile-faithful install)
+npm ci
 
 # Start development server (or `./start.sh dev` for the same thing)
 npm run dev
+```
 
+With `npm run dev`, Vite proxies browser requests to **`/api/*`** → **`http://127.0.0.1:8888`** (same pattern as Docker nginx). Override the upstream with **`VITE_DEV_PROXY_TARGET`** or **`VITE_DEV_BACKEND_HOST`** / **`VITE_DEV_BACKEND_PORT`** in `.env`. See [`.env.example`](.env.example) for **`VITE_HEXSTRIKE_URL`** (Docker build vs local backend vs same-origin dev).
+
+```bash
 # Type-check, test, build, lint
 npm run typecheck
 npm test
@@ -84,12 +124,70 @@ npm run build
 npm run lint
 ```
 
+## 🆓 Run HexStrike 100% free
+
+HexStrike runs end-to-end at **$0** — no API keys, no accounts, no cloud bills. A bundled local LLM does the reasoning, and the entire OSINT/recon/forensics toolset is free and self-contained. The single honest exception is **web-wide automated face search** (covered below). Everything else works offline or against free public services.
+
+### Free LLM brain
+
+The recommended path is the **bundled Ollama** service:
+
+```bash
+docker compose --profile llm up -d
+```
+
+This auto-pulls a default model (`qwen2.5:1.5b`), enables CORS, and serves at `http://localhost:11434`. Then in the app:
+
+> **Settings → Provider: Ollama → Fetch models → Save Settings**
+
+No key required, fully offline. Bump quality with `OLLAMA_MODEL=qwen2.5:3b` (or `llama3.2:3b`) in `.env`.
+
+**Other free options:**
+
+- **LM Studio (local)** — Download from [lmstudio.ai](https://lmstudio.ai), start the server, then set **Provider: LM Studio** and Fetch. No key required. Two ways to connect:
+  - **Docker UI (easiest):** set Base URL to **`/lmstudio`** — nginx proxies to your host LM Studio same-origin, so you do **not** need to enable CORS.
+  - **Direct:** set Base URL to `http://localhost:1234` (`/v1` auto-appended) and **enable CORS** in LM Studio's server settings (otherwise the browser blocks the fetch).
+- **Free cloud tiers** — Get a free key and select the matching provider:
+  - **Groq** — [console.groq.com/keys](https://console.groq.com/keys) (fast, generous free tier)
+  - **Google Gemini** — [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (generous free tier)
+  - **OpenRouter** — via **Provider: Custom**, Base URL `https://openrouter.ai/api/v1`, with a free key for its free models
+
+### Free tools
+
+**43 of 44 bundled tools** run without an API key. The recon, OSINT, and forensics stack is keyless and self-contained — ideal for offline or restricted environments:
+
+- **OSINT / recon** — `sherlock`, `holehe`, `ghunt`, `dnstwist`, `httpx`, `nuclei`, `nmap`, `gau`, `waybackurls`, `whois`, `dig`
+- **Forensics** — `exiftool`, `binwalk`, `steghide`, `foremost`, `strings`, `file`, `tcpdump`
+
+A handful accept **optional, free API keys** purely to widen coverage — they still work fully without them: `maigret`, and `subfinder`/`amass` (optional free Shodan/Censys keys increase subdomain coverage).
+
+### Free face / person / image OSINT
+
+Local face work and people-search are completely free:
+
+- **Local face recognition** (`face_recognition` / dlib) — detect, count, and locate faces, extract 128-dimensional embeddings, and compare two images to decide if they show the same person. 100% offline, zero API calls, no credentials. Via `osint-image-search face-detect|face-encode|face-compare`.
+- **People / username search** — `sherlock`, `maigret`, `holehe`, and `social-analyzer` enumerate public profiles across hundreds of platforms for free.
+- **Reverse-image search** — `osint-image-search reverse <url>` generates direct upload URLs for **Google Lens, Yandex, Bing, and TinEye**. Opening them and uploading is free; they return where an image appears online.
+
+**The one paid boundary:** *web-wide automated face search* — uploading a face and auto-crawling the internet for matches — is only offered by **[PimEyes](https://pimeyes.com/en)** and **[FaceCheck.id](https://facecheck.id/)**, both of which require an account and paid credits. HexStrike only generates the upload links; it does not scrape these services. There is no genuinely free alternative at that scale, and we won't pretend otherwise.
+
 ## 🛠 Troubleshooting
 
 **Frontend loads but tools fail with "Backend unreachable"**
 The HexStrike backend isn't running. Either start it via
 `./start.sh up --with-backend` or point Settings → HexStrike URL at an
 existing backend (and ensure it allows your origin via CORS).
+
+Run `./scripts/verify-stack.sh` from the repo root to check container status,
+`GET /health` on the backend (port **8888**) and through the UI (port **4173**).
+
+**“Backend not working” but Docker shows healthy**
+The HTTP server may be up while most CLI tools are missing inside the container (`tools_status` in `/health`). Install tools in the backend image or expect many executions to fail until binaries exist.
+
+Settings → **HexStrike Server URL**: use **`/api`** when using the Docker UI so nginx proxies to `hexstrike-backend`. Use **`http://127.0.0.1:8888`** only when the backend listens on the host and port **8888** is published (`docker compose` maps `8888:8888`).
+
+**Docker UI container restarts in a loop (`host not found in upstream "hexstrike-backend"`)**
+Older images resolved the backend hostname at nginx startup. Current `nginx.conf` resolves the upstream at request time so the frontend container can start **without** the backend; `/api/*` then returns **503** with JSON until the backend joins the compose network.
 
 **`docker compose up` fails with `ImageNotFound: hexstrike-backend`**
 You're invoking the backend profile without a built image. Either remove

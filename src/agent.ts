@@ -11,6 +11,7 @@
 
 import type { AISettings, HexstrikeTool, ToolExecution } from './types'
 import { Provider } from './types'
+import { ensureLmStudioApiBase } from './api'
 
 // ─── Reasoning-model detection (P3-8) ──────────────────────────────────────
 
@@ -155,9 +156,12 @@ export function substituteVariables(
   const missing: string[] = []
   const value = template.replace(/\$\{([^}]+)\}/g, (_, raw: string) => {
     const path = raw.trim().split('.')
-    let scope: any
+    let scope: string | number | string[] | number[] | undefined
     if (path[0] === 'prev') {
-      const tool = path[1]
+      // Tool keys in `context.prev` are normalized to lowercase (see
+      // entitiesByTool) so `${prev.Subfinder_Enum.subdomains}` resolves the
+      // same as `${prev.subfinder_enum.subdomains}`.
+      const tool = path[1]?.toLowerCase()
       const field = path[2]
       scope = context.prev[tool]?.[field as keyof ExtractedEntities]
     } else if (path[0] === 'entities') {
@@ -166,10 +170,10 @@ export function substituteVariables(
         missing.push(raw)
         return ''
       }
-      const field = idxMatch[1] as keyof ExtractedEntities
-      const idx = idxMatch[2] !== undefined ? Number(idxMatch[2]) : null
-      const arr = context.entities[field] as any[] | undefined
-      scope = idx !== null ? arr?.[idx] : arr
+       const field = idxMatch[1] as keyof ExtractedEntities
+       const idx = idxMatch[2] !== undefined ? Number(idxMatch[2]) : null
+       const arr = context.entities[field] as string[] | number[] | undefined
+       scope = idx !== null ? arr?.[idx] : arr
     } else {
       missing.push(raw)
       return ''
@@ -247,6 +251,7 @@ Respond with ONLY a JSON object — no markdown fences, no commentary — matchi
 Rules:
 - Use ONLY tool names that appear in the availableTools list. Never invent.
 - Order steps so reconnaissance precedes exploitation.
+- For email or username targets, prefer OSINT, breach, and social-footprint tools before aggressive network exploitation when the task is identity-focused.
 - Reference prior step output via \\\${prev.<tool>.<field>} where field is one of:
   domains, subdomains, ips, urls, emails, cves, hashes, ports.
 - Keep the plan focused: 4–10 steps is ideal.
@@ -298,6 +303,20 @@ Produce the JSON plan now.`
   }
 }
 
+/** A plan is only usable if every step has at least a tool, target, and reason. */
+function isValidPlanShape(record: Record<string, unknown> | null | undefined): record is Record<string, unknown> {
+  if (!record || !Array.isArray(record.steps) || record.steps.length === 0) return false
+  return record.steps.every((s) => {
+    const step = s as Record<string, unknown>
+    return (
+      step != null &&
+      typeof step.tool === 'string' && step.tool.trim().length > 0 &&
+      typeof step.target === 'string' &&
+      typeof step.reason === 'string'
+    )
+  })
+}
+
 function parsePlanJSON(text: string): LLMScanPlan | null {
   // Try direct parse first; otherwise extract the first {...} block.
   let raw = text.trim()
@@ -305,14 +324,14 @@ function parsePlanJSON(text: string): LLMScanPlan | null {
     raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
   }
   try {
-    const obj = JSON.parse(raw)
-    if (Array.isArray(obj?.steps)) return obj as LLMScanPlan
+    const record = JSON.parse(raw) as Record<string, unknown>
+    if (isValidPlanShape(record)) return record as unknown as LLMScanPlan
   } catch { /* fall through */ }
   const m = raw.match(/\{[\s\S]*\}/)
   if (!m) return null
   try {
-    const obj = JSON.parse(m[0])
-    if (Array.isArray(obj?.steps)) return obj as LLMScanPlan
+    const record = JSON.parse(m[0]) as Record<string, unknown>
+    if (isValidPlanShape(record)) return record as unknown as LLMScanPlan
   } catch { /* ignore */ }
   return null
 }
@@ -350,8 +369,9 @@ async function singleShotCompletion(
       }),
     })
     if (!res.ok) return null
-    const data = await res.json()
-    return data.content?.[0]?.text ?? null
+    const data = await res.json() as Record<string, unknown>
+    const content = data.content as Array<Record<string, unknown>> | undefined
+    return content?.[0]?.text as string | null ?? null
   }
 
   if (provider === Provider.google) {
@@ -367,12 +387,18 @@ async function singleShotCompletion(
       }),
     })
     if (!res.ok) return null
-    const data = await res.json()
-    return data.candidates?.[0]?.content?.parts?.[0]?.text ?? null
+    const data = await res.json() as Record<string, unknown>
+    const candidates = data.candidates as Array<Record<string, unknown>> | undefined
+    const firstCandidate = candidates?.[0] as Record<string, unknown> | undefined
+    const content = firstCandidate?.content as Record<string, unknown> | undefined
+    const parts = content?.parts as Array<Record<string, unknown>> | undefined
+    return parts?.[0]?.text as string | null ?? null
   }
 
   // OpenAI-compatible
-  const base = (settings.baseUrl || defaultBaseFor(provider)).replace(/\/+$/, '')
+  const base = provider === Provider.lmstudio
+    ? ensureLmStudioApiBase(settings.baseUrl)
+    : (settings.baseUrl || defaultBaseFor(provider)).replace(/\/+$/, '')
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (settings.apiKey) headers['Authorization'] = `Bearer ${settings.apiKey}`
   const body: Record<string, unknown> = {
@@ -393,8 +419,10 @@ async function singleShotCompletion(
     body: JSON.stringify(body),
   })
   if (!res.ok) return null
-  const data = await res.json()
-  return data.choices?.[0]?.message?.content ?? null
+  const data = await res.json() as Record<string, unknown>
+  const choices = data.choices as Array<Record<string, unknown>> | undefined
+  const message = choices?.[0]?.message as Record<string, unknown> | undefined
+  return message?.content as string | null ?? null
 }
 
 function defaultBaseFor(provider: Provider): string {
@@ -420,26 +448,37 @@ export function addUsage(a: TokenUsage, b: Partial<TokenUsage>): TokenUsage {
 }
 
 /** Extract token usage from a provider response payload (best-effort). */
-export function readUsageFromChunk(chunk: any): Partial<TokenUsage> | null {
+export function readUsageFromChunk(chunk: unknown): Partial<TokenUsage> | null {
   if (!chunk) return null
+  const c = chunk as Record<string, unknown>
   // OpenAI / OpenAI-compatible: {usage: {prompt_tokens, completion_tokens}}
-  if (chunk.usage) {
+  if (c.usage) {
+    const u = c.usage as Record<string, unknown>
     return {
-      in: chunk.usage.prompt_tokens || chunk.usage.input_tokens || 0,
-      out: chunk.usage.completion_tokens || chunk.usage.output_tokens || 0,
+      in: (u.prompt_tokens || u.input_tokens || 0) as number,
+      out: (u.completion_tokens || u.output_tokens || 0) as number,
     }
   }
   // Anthropic message_delta carries usage on usage.* under message_start
-  if (chunk.message?.usage) {
-    return { in: chunk.message.usage.input_tokens || 0, out: chunk.message.usage.output_tokens || 0 }
+  if (c.message && typeof c.message === 'object') {
+    const m = c.message as Record<string, unknown>
+    if (m.usage) {
+      const u = m.usage as Record<string, unknown>
+      return { in: (u.input_tokens || 0) as number, out: (u.output_tokens || 0) as number }
+    }
   }
   // Anthropic delta event
-  if (chunk.type === 'message_delta' && chunk.usage) {
-    return { in: chunk.usage.input_tokens || 0, out: chunk.usage.output_tokens || 0 }
+  if (c.type === 'message_delta' && c.usage) {
+    const u = c.usage as Record<string, unknown>
+    return { in: (u.input_tokens || 0) as number, out: (u.output_tokens || 0) as number }
   }
   // Gemini
-  if (chunk.usageMetadata) {
-    return { in: chunk.usageMetadata.promptTokenCount || 0, out: chunk.usageMetadata.candidatesTokenCount || 0 }
+  if (c.usageMetadata) {
+    const meta = c.usageMetadata as Record<string, unknown>
+    return {
+      in: (meta.promptTokenCount || 0) as number,
+      out: (meta.candidatesTokenCount || 0) as number,
+    }
   }
   return null
 }
@@ -450,10 +489,559 @@ export function entitiesByTool(executions: ToolExecution[]): Record<string, Extr
   const out: Record<string, ExtractedEntities> = {}
   for (const exec of executions) {
     if (!exec.result) continue
+    // Normalize the key so `${prev.<tool>...}` lookups are case-insensitive.
+    const key = exec.toolName.toLowerCase()
     const entities = extractEntities(exec.result)
-    out[exec.toolName] = out[exec.toolName]
-      ? mergeEntities(out[exec.toolName], entities)
-      : entities
+    out[key] = out[key] ? mergeEntities(out[key], entities) : entities
   }
   return out
+}
+
+// ─── Tool Installation & Build Support (P4-New) ────────────────────────
+
+export interface ToolInstallPlan {
+  canInstall: boolean
+  missingTools: string[]
+  installCommand: string | null
+  packageManager: 'apt' | 'apk' | 'pip' | 'pip3' | 'npm' | null
+  recommendedPackages: string[]
+}
+
+/**
+ * Analyze which tools from the desired list are missing from the
+ * available tools catalog, and generate an installation plan.
+ */
+export function analyzeToolAvailability(
+  desiredToolNames: string[],
+  availableTools: HexstrikeTool[],
+  backendHealth: Record<string, unknown> | null
+): ToolInstallPlan {
+  const availableNames = new Set(availableTools.map((t) => t.name.toLowerCase()))
+  const missingTools = desiredToolNames.filter((name) => !availableNames.has(name.toLowerCase()))
+
+   // Check backend health for package manager info
+   const health = (backendHealth || {}) as Record<string, unknown>
+   const packageManagers = health.package_managers as Record<string, unknown> | undefined
+   const osType = health.os_type as string | undefined
+   const hasApt = !!packageManagers?.apt || (typeof osType === 'string' && osType.includes('linux'))
+   const hasApk = !!packageManagers?.apk || (typeof osType === 'string' && osType.includes('alpine'))
+   const hasPip = !!packageManagers?.pip
+
+  let packageManager: ToolInstallPlan['packageManager'] = null
+  if (hasApt) packageManager = 'apt'
+  else if (hasApk) packageManager = 'apk'
+  else if (hasPip) packageManager = 'pip3'
+
+// Map common tools to their package names
+   const toolToPackage: Record<string, string> = {
+     // Network reconnaissance
+     'nmap': 'nmap',
+     'masscan': 'masscan',
+     'rustscan': 'rustscan',
+     'naabu': 'naabu',
+     'smap': 'smap',
+     'netdiscover': 'netdiscover',
+     'arp-scan': 'arp-scan',
+     'zgrab': 'zgrab',
+     'zgrab2': 'zgrab2',
+     'massdns': 'massdns',
+     'dnsgen': 'dnsgen',
+     'amass': 'amass',
+     'subfinder': 'subfinder',
+     'assetfinder': 'assetfinder',
+     'findomain': 'findomain',
+      'shuffledns': 'shuffledns',
+      'dnsx': 'dnsx',
+      'chaos': 'chaos',
+      'crobat': 'crobat',
+      'dnsprobe': 'dnsprobe',
+      'dnsrecon': 'dnsrecon',
+      'dnsenum': 'dnsenum',
+      'fierce': 'fierce',
+      'knockpy': 'knockpy',
+      'sublist3r': 'sublist3r',
+      // Web vulnerability scanning
+      'nikto': 'nikto',
+      'nuclei': 'nuclei',
+      'gobuster': 'gobuster',
+      'ffuf': 'ffuf',
+      'feroxbuster': 'feroxbuster',
+      'dirsearch': 'dirsearch',
+      'wfuzz': 'wfuzz',
+      'burpsuite': 'burpsuite',
+      'zaproxy': 'zaproxy',
+      'wpscan': 'wpscan',
+      'joomscan': 'joomscan',
+      'dalfox': 'dalfox',
+      'arjun': 'arjun',
+      'sqlmap': 'sqlmap',
+      'commix': 'commix',
+      'xsser': 'xsser',
+      'skipfish': 'skipfish',
+      'w3af': 'w3af',
+      'arachni': 'arachni',
+      'katana': 'katana',
+      'gospider': 'gospider',
+      'hakrawler': 'hakrawler',
+      'parameth': 'parameth',
+      'xsstrike': 'xsstrike',
+      // HTTP / API testing
+      'httpx': 'httpx',
+      'attacknarwhal': 'attacknarwhal',
+      // Network exploitation / LAN
+      'smbclient': 'smbclient',
+      'smbmap': 'smbmap',
+      'enum4linux': 'enum4linux',
+      'crackmapexec': 'crackmapexec',
+      'smbscan': 'smbscan',
+      'impacket': 'python3-impacket',
+      'responder': 'responder',
+      'metasploit': 'metasploit-framework',
+      'msfconsole': 'metasploit-framework',
+      'msfvenom': 'metasploit-framework',
+      // OSINT / Email
+      'theharvester': 'theharvester',
+      'holehe': 'holehe',
+      'h8mail': 'h8mail',
+      'hibp': 'haveibeenpwned',
+      'emailrep': 'emailrep',
+      'trufflehog': 'trufflehog',
+      'gitleaks': 'gitleaks',
+      'reconng': 'recon-ng',
+      'spiderfoot': 'spiderfoot',
+      // Social media / username discovery
+      'sherlock': 'sherlock-project',
+      'maigret': 'maigret',
+      'social-analyzer': 'social-analyzer',
+      'snoop': 'snoop.py',
+      'whatsmyname': 'whatsmyname',
+      'userrecon': 'userrecon',
+      'blackbird': 'blackbird',
+      'osintgram': 'osintgram',
+      'toutatis': 'toutatis',
+      'ghunt': 'ghunt',
+      'photon': 'photon',
+      'sn0int': 'sn0int',
+      'sociolis': 'sociolis',
+      'socialscan': 'socialscan',
+      'inky': 'inky',
+      'moriarty': 'moriarty',
+      // Archive / history
+      'archivebox': 'archivebox',
+      // DNS / network tools
+      'dnstwist': 'dnstwist',
+      'mapcidr': 'mapcidr',
+      'ipcalc': 'ipcalc',
+      'prips': 'prips',
+      'subbrute': 'subbrute',
+      'brutespr': 'brutespr',
+      'host': 'dnsutils',
+      'dig': 'dnsutils',
+      'whois': 'whois',
+      // Password attacks
+     'hashcat': 'hashcat',
+     'john': 'john',
+     'hydra': 'hydra',
+     'medusa': 'medusa',
+     'ncrack': 'ncrack',
+     'crowbar': 'crowbar',
+     'crunch': 'crunch',
+     'cewl': 'cewl',
+     'patator': 'patator',
+     'hashid': 'hashid',
+     'cupp': 'cupp',
+     'wordlistctl': 'wordlistctl',
+     'rsmangler': 'rsmangler',
+     // Wireless / Bluetooth
+     'aircrack': 'aircrack-ng',
+     'wifite': 'wifite',
+     'reaver': 'reaver',
+     'kismet': 'kismet',
+     'bettercap': 'bettercap',
+     'hcxtools': 'hcxtools',
+     'hcxdumptool': 'hcxdumptool',
+     'wifiphisher': 'wifiphisher',
+     'fluxion': 'fluxion',
+     'evilginx2': 'evilginx',
+     'ubertooth': 'ubertooth',
+     'bluetooth': 'bluez',
+     'bleah': 'bleah',
+     'gatttool': 'bluez',
+     // Forensics
+     'binwalk': 'binwalk',
+     'exiftool': 'exiftool',
+     'volatility': 'volatility3',
+     'autopsy': 'autopsy',
+     'sleuthkit': 'sleuthkit',
+     'foremost': 'foremost',
+     'photorec': 'testdisk',
+     'scalpel': 'scalpel',
+     'bulk_extractor': 'bulk_extractor',
+     'dd': 'coreutils',
+     'dc3dd': 'dc3dd',
+     'guymager': 'guymager',
+     // Memory / debugging
+     'gdb': 'gdb',
+     'pwndbg': 'pwndbg',
+     'gef': 'gef',
+     'radare2': 'radare2',
+     'r2pipe': 'r2pipe',
+     'lldb': 'lldb',
+     'edb-debugger': 'edb-debugger',
+     // Binary analysis / RE
+      // Binary analysis / RE
+      'objdump': 'binutils',
+      'strings': 'binutils',
+      'readelf': 'binutils',
+      'nm': 'binutils',
+      'ida': 'ida-free',
+      'ghidra': 'ghidra',
+      'binaryninja': 'binaryninja',
+      'cutter': 'cutter',
+      'x64dbg': 'x64dbg',
+      'ollydbg': 'ollydbg',
+      // Source code analysis / SAST
+      'semgrep': 'semgrep',
+      'bandit': 'bandit',
+      'pylint': 'pylint',
+      'eslint': 'eslint',
+      'brakeman': 'brakeman',
+      'findsecbugs': 'findsecbugs',
+      'spotbugs': 'spotbugs',
+      'checkmarx': 'checkmarx',
+      'sonarqube': 'sonarqube-scanner',
+      'codeql': 'codeql',
+      // Exploitation
+      'beef': 'beef-xss',
+      'empire': 'powershell-empire',
+      'covenant': 'covenant',
+      'sliver': 'sliver',
+      'pwncat': 'pwncat',
+      'pupy': 'pupy',
+      'nishang': 'nishang',
+      // Privilege escalation / post-ex
+      'linenum': 'linenum',
+      'linpeas': 'linpeas',
+      'winpeas': 'winpeas',
+      'lse': 'lse',
+      'mimikatz': 'mimikatz',
+      'powerup': 'powerup',
+      'privesccheck': 'privesccheck',
+      'beacon': 'cobaltstrike',
+      // Windows enumeration
+      'powerview': 'powerview',
+      'bloodhound': 'bloodhound',
+      'sharpcollect': 'sharpcollect',
+      'adfind': 'adfind',
+      'ldapsearch': 'ldap-utils',
+      'rpcclient': 'samba',
+      'net': 'samba',
+      'wmic': 'wmi-client',
+     // Container / K8s
+     'docker': 'docker',
+     'docker-compose': 'docker-compose',
+     'kubectl': 'kubectl',
+     'kubelet': 'kubelet',
+     'kustomize': 'kustomize',
+     'helm': 'helm',
+     'trivy': 'trivy',
+     'clair': 'clair',
+     'anchore': 'anchore-cli',
+     'kube-score': 'kube-score',
+     'kubesec': 'kubesec',
+     'kubescape': 'kubescape',
+     'falco': 'falco',
+     'sysdig': 'sysdig',
+     'grype': 'grype',
+     // Mobile / WhatsApp
+     'mobsf': 'mobsf',
+     'mobsf-android': 'mobsf',
+     'mobsf-ios': 'mobsf',
+     'drozer': 'drozer',
+     'frida': 'frida-tools',
+     'objection': 'objection',
+     'apktool': 'apktool',
+     'jadx': 'jadx',
+     'dex2jar': 'dex2jar',
+     'enjarify': 'enjarify',
+     'whatsapp-parser': 'whatsapp-parser',
+     'wasware': 'wasware',
+     'wazzap': 'wazzap',
+     'smsbug': 'smsbug',
+     // Cloud security
+     'aws-cli': 'awscli',
+     'awscli': 'awscli',
+     'gcp-cli': 'google-cloud-cli',
+     'azure-cli': 'azure-cli',
+     'pacu': 'pacu',
+     'cloudsploit': 'cloudsploit',
+     'scoutSuite': 'scout-suite',
+     'prowler': 'prowler',
+     'enumerate-iam': 'enumerate-iam',
+     'pmapper': 'pmapper',
+     'cfr': 'cfr',
+     'kelly': 'kelly',
+     // Reverse engineering / Malware
+     'yara': 'yara',
+     'yargen': 'yargen',
+     'pescanner': 'pescanner',
+     'peframe': 'peframe',
+     'floss': 'floss',
+     'stringsifter': 'stringsifter',
+     'cape': 'cape',
+     'viper': 'viper',
+     // IoT / SCADA
+     'boofuzz': 'boofuzz',
+     'sulley': 'sulley',
+     'autosploit': 'autosploit',
+     'iot-toolkit': 'iot-toolkit',
+     ' firmadyne': 'firmadyne',
+     'firmwalker': 'firmwalker',
+     'firmware-mod-kit': 'firmware-mod-kit',
+     // SOC / IR
+     'velociraptor': 'velociraptor',
+     'osquery': 'osquery',
+     'apt32': 'apt32',
+     'timesketch': 'timesketch',
+     'log2timeline': 'plaso',
+     'plaso': 'plaso',
+     'wireshark': 'wireshark',
+     'tshark': 'wireshark',
+     'tcpdump': 'tcpdump',
+     'ngrep': 'ngrep',
+     'suricata': 'suricata',
+     'snort': 'snort',
+     'zeek': 'zeek',
+     'securityonion': 'securityonion',
+     // Additional tools from Awesome Hacking
+     // Fuzzing
+     'afl': 'afl++',
+     'libfuzzer': 'libfuzzer',
+     'honggfuzz': 'honggfuzz',
+     'pwndev': 'pwndev',
+     // Malware Analysis
+     'cape-sandbox': 'cape',
+     'cuckoo': 'cuckoo',
+     'maltrail': 'maltrail',
+     'clamav': 'clamav',
+     // Threat Intelligence
+     'misp': 'misp',
+     'opencti': 'opencti',
+     'yeti': 'yeti',
+     'anubis': 'anubis',
+     // Red Teaming
+     'sliver-c2': 'sliver',
+     'mythic': 'mythic',
+     'caldera': 'caldera',
+     'atomic-red-team': 'atomic-red-team',
+     // Steganography
+     'steghide': 'steghide',
+     'zsteg': 'zsteg',
+     'stegsolve': 'stegsolve',
+     'outguess': 'outguess',
+     // Web Proxies
+     'mitmproxy': 'mitmproxy',
+     'proxychains': 'proxychains',
+     // Payload Generation
+     'venom': 'venom',
+     'shellnoob': 'shellnoob',
+     // Android Tools
+     'adb': 'android-tools-adb',
+     'androguard': 'androguard',
+     // iOS Tools
+     'ideviceinstaller': 'libimobiledevice',
+     'cycript': 'cycript',
+     // Network Analysis
+     'netsniff-ng': 'netsniff-ng',
+     'passivedns': 'passivedns',
+     'dnschef': 'dnschef',
+     // Password Analysis
+     'hash-identifier': 'hash-identifier',
+     'john-jumbo': 'john',
+     // Social Engineering
+     'set': 'set',
+     'gophish': 'gophish',
+     'king-phisher': 'king-phisher',
+     // Wireless
+     'reaver-wps': 'reaver',
+     'pixiewps': 'pixiewps',
+     // Hardware Hacking
+     'urh': 'urh',
+     'rtl-sdr': 'rtl-sdr',
+     'gnuradio': 'gnuradio',
+   }
+
+  const recommendedPackages = missingTools
+    .map((t) => toolToPackage[t.toLowerCase()] || t)
+    .filter(Boolean)
+
+  return {
+    canInstall: packageManager !== null && recommendedPackages.length > 0,
+    missingTools,
+    installCommand: packageManager && recommendedPackages.length > 0
+      ? `${packageManager}:${recommendedPackages.join(',')}`
+      : null,
+    packageManager,
+    recommendedPackages,
+  }
+}
+
+/**
+ * Check if a tool execution result indicates the tool is missing/not found,
+ * and if so, return the tool name for installation.
+ */
+export function detectMissingToolFromError(errorOutput: string): string | null {
+  if (!errorOutput || typeof errorOutput !== 'string') return null
+
+  const lower = errorOutput.toLowerCase()
+
+  // Common patterns for "tool not found" errors
+  const notFoundPatterns = [
+    // "bash: nmap: command not found" or "nmap: command not found"
+    /(\S+):\s*command not found/i,
+    // "command not found: nmap" (less common ordering)
+    /command not found:?\s*([a-zA-Z0-9_.-]+)/i,
+    // "/usr/bin/nmap: no such file or directory"
+    /(\S+):\s*no such file or directory/i,
+    // "no such file or directory: /usr/bin/nmap"
+    /no such file or directory:?\s*([a-zA-Z0-9_.\/-]+)/i,
+    // "tool 'subfinder' not found" or "tool subfinder not found"
+    /tool\s+'?([a-zA-Z0-9_.-]+)'?\s+not found/i,
+    // "package 'nuclei' is not installed"
+    /package\s+'?([a-zA-Z0-9_.-]+)'?\s+is not installed/i,
+    // "nmap: not found" (e.g. Termux/Android)
+    /([a-zA-Z0-9_.-]+):\s*not found/i,
+    // "unable to find nmap" or "could not find nmap"
+    /unable to find\s+([a-zA-Z0-9_.-]+)/i,
+    /could not find\s+([a-zA-Z0-9_.-]+)/i,
+  ]
+
+  for (const pattern of notFoundPatterns) {
+    const match = lower.match(pattern)
+    if (match && match[1]) {
+      // Extract basename from paths like /usr/bin/nmap → nmap
+      const raw = match[1].trim()
+      const basename = raw.includes('/') ? raw.split('/').pop()! : raw
+      return basename
+    }
+  }
+
+  return null
+}
+
+/**
+ * Generate an automatic tool installation step for the scan plan
+ * when tools are detected as missing during execution.
+ */
+export function generateAutoInstallStep(
+  missingTool: string,
+  packageManager: ToolInstallPlan['packageManager']
+): { step: number; tool: string; target: string; reason: string } | null {
+  if (!packageManager) return null
+
+const toolToPackage: Record<string, string> = {
+      // Network reconnaissance
+      'nmap': 'nmap',
+      'masscan': 'masscan',
+      'rustscan': 'rustscan',
+      'naabu': 'naabu',
+      'smap': 'smap',
+      'netdiscover': 'netdiscover',
+      'zgrab': 'zgrab',
+      // Web vulnerability scanning
+      'nikto': 'nikto',
+      'nuclei': 'nuclei',
+      'gobuster': 'gobuster',
+      'ffuf': 'ffuf',
+      'feroxbuster': 'feroxbuster',
+      'dirsearch': 'dirsearch',
+      'wpscan': 'wpscan',
+      'dalfox': 'dalfox',
+      'arjun': 'arjun',
+      'sqlmap': 'sqlmap',
+      'commix': 'commix',
+      // Subdomain enumeration
+      'subfinder': 'subfinder',
+      'amass': 'amass',
+      'assetfinder': 'assetfinder',
+      'findomain': 'findomain',
+      'shuffledns': 'shuffledns',
+      'dnsx': 'dnsx',
+     'chaos': 'chaos',
+      // HTTP probing
+      'httpx': 'httpx',
+      // OSINT / Email
+      'theharvester': 'theharvester',
+      'holehe': 'holehe',
+      'h8mail': 'h8mail',
+      'trufflehog': 'trufflehog',
+      'gitleaks': 'gitleaks',
+      'reconng': 'recon-ng',
+      // URL discovery
+      'waybackurls': 'waybackurls',
+      'gau': 'getallurls',
+      // Social media / username discovery
+      'sherlock': 'sherlock-project',
+      'maigret': 'maigret',
+      'social-analyzer': 'social-analyzer',
+      'snoop': 'snoop.py',
+      'whatsmyname': 'whatsmyname',
+      'userrecon': 'userrecon',
+      'blackbird': 'blackbird',
+      'osintgram': 'osintgram',
+      'toutatis': 'toutatis',
+      'photon': 'photon',
+      // DNS tools
+      'dnstwist': 'dnstwist',
+      // Password attacks
+      'hashcat': 'hashcat',
+      'john': 'john',
+      'hydra': 'hydra',
+      'medusa': 'medusa',
+      // Wireless
+      'aircrack': 'aircrack-ng',
+      'wifite': 'wifite',
+      // Forensics
+      'binwalk': 'binwalk',
+      'exiftool': 'exiftool',
+      'volatility': 'volatility3',
+      // Mobile / WhatsApp
+      'mobsf': 'mobsf',
+      'frida': 'frida-tools',
+      'jadx': 'jadx',
+      // Cloud
+      'aws-cli': 'awscli',
+      'pacu': 'pacu',
+      'cloudsploit': 'cloudsploit',
+      // Additional tools
+      'wireshark': 'wireshark',
+      'tshark': 'wireshark',
+      'tcpdump': 'tcpdump',
+      'burpsuite': 'burpsuite',
+      'zaproxy': 'zaproxy',
+      'metasploit': 'metasploit-framework',
+      'msfconsole': 'metasploit-framework',
+      'bloodhound': 'bloodhound',
+      'impacket': 'python3-impacket',
+      'responder': 'responder',
+      'crackmapexec': 'crackmapexec',
+      'linpeas': 'linpeas',
+      'winpeas': 'winpeas',
+      'mimikatz': 'mimikatz',
+      'yara': 'yara',
+      'ghidra': 'ghidra',
+      'radare2': 'radare2',
+      'gdb': 'gdb',
+      'strings': 'binutils',
+      'objdump': 'binutils',
+    }
+
+  const pkg = toolToPackage[missingTool.toLowerCase()] || missingTool
+
+  return {
+    step: 1,
+    tool: 'hexstrike_install_packages',
+    target: `${packageManager}:${pkg}`,
+    reason: `Auto-install missing tool: ${missingTool}`,
+  }
 }

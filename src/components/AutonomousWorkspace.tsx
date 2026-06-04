@@ -18,11 +18,11 @@ import {
   Eye,
   Zap,
 } from 'lucide-react'
-import type { ToolExecution, HexstrikeTool, OSINTReport } from '../types'
+import type { ToolExecution, HexstrikeTool, OSINTReport, AIAnalysisResult } from '../types'
 import { useApp } from '../AppContext'
 import { executeHexstrikeTool } from '../api'
 import { generateScanPlanSmart, detectTargetType, analyzeResults, type AIScanPlan } from '../aiAgent'
-import { entitiesByTool, substituteVariables, FailureTracker } from '../agent'
+import { entitiesByTool, substituteVariables, mergeEntities, emptyScratchpad, FailureTracker } from '../agent'
 import { generateOSINTReport, generateNarrativeReport } from '../reportGenerator'
 
 interface AutonomousWorkspaceProps {
@@ -39,10 +39,10 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
   const [currentStep, setCurrentStep] = useState(0)
   const [scanPlan, setScanPlan] = useState<AIScanPlan | null>(null)
   const [completedExecutions, setCompletedExecutions] = useState<ToolExecution[]>([])
-  const [showPlan, setShowPlan] = useState(true)
-  const [generatedReport, setGeneratedReport] = useState<OSINTReport | null>(null)
-  const [analysis, setAnalysis] = useState<any>(null)
-  const [showNarrative, setShowNarrative] = useState(false)
+   const [showPlan, setShowPlan] = useState(true)
+   const [generatedReport, setGeneratedReport] = useState<OSINTReport | null>(null)
+   const [analysis, setAnalysis] = useState<AIAnalysisResult | null>(null)
+   const [showNarrative, setShowNarrative] = useState(false)
 
   // Persistent failure tracker across the scan run (P3-10).
   const failureTrackerRef = useRef(new FailureTracker())
@@ -92,9 +92,13 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
       // resolved against entities extracted from earlier executions.
       // Use the per-step target from the plan (which is where the LLM
       // places the placeholders); fall back to the top-level target.
+      // `prev` is per-tool entities; `entities` is the merged view across all
+      // prior executions so `${entities.ips[0]}` / `${entities.domains}`
+      // references actually resolve (previously hardcoded empty → always blank).
+      const prevByTool = entitiesByTool(completedExecutions)
       const ctx = {
-        prev: entitiesByTool(completedExecutions),
-        entities: { domains: [], subdomains: [], ips: [], urls: [], emails: [], cves: [], hashes: [], ports: [] },
+        prev: prevByTool,
+        entities: Object.values(prevByTool).reduce((acc, e) => mergeEntities(acc, e), emptyScratchpad()),
       }
       const stepTarget = recommendation.target ?? target
       const targetRes = substituteVariables(stepTarget, ctx)
@@ -105,7 +109,7 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
 
       try {
         const result = await executeHexstrikeTool(
-          settings.hexstrikeUrl || 'http://localhost:8888',
+          settings.hexstrikeUrl,
           recommendation.tool.name,
           resolvedTarget,
           { raw: optsRaw }
@@ -120,27 +124,28 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
           timestamp: Date.now(),
         }
 
-        setCompletedExecutions(prev => [...prev, execution])
-        addWorkspaceExecution(execution)
-        addRecentTool(recommendation.tool.name)
-        failureTrackerRef.current.reset(recommendation.tool.name)
+         setCompletedExecutions(prev => [...prev, execution])
+         addWorkspaceExecution(execution)
+         addRecentTool(recommendation.tool.name)
+         failureTrackerRef.current.reset(recommendation.tool.name)
 
-        // Move to next step
-        setCurrentStep(prev => prev + 1)
-      } catch (err: any) {
-        failureTrackerRef.current.record(recommendation.tool.name)
-        const execution: ToolExecution = {
-          id: `auto-${Date.now()}`,
-          toolName: recommendation.tool.name,
-          target: resolvedTarget,
-          status: 'error',
-          result: `Error: ${err?.message ?? String(err)}`,
-          timestamp: Date.now(),
-        }
-        setCompletedExecutions(prev => [...prev, execution])
-        addWorkspaceExecution(execution)
-        setCurrentStep(prev => prev + 1)
-      }
+         // Move to next step
+         setCurrentStep(prev => prev + 1)
+       } catch (err) {
+         failureTrackerRef.current.record(recommendation.tool.name)
+         const msg = err instanceof Error ? err.message : String(err)
+         const execution: ToolExecution = {
+           id: `auto-${Date.now()}`,
+           toolName: recommendation.tool.name,
+           target: resolvedTarget,
+           status: 'error',
+           result: `Error: ${msg}`,
+           timestamp: Date.now(),
+         }
+         setCompletedExecutions(prev => [...prev, execution])
+         addWorkspaceExecution(execution)
+         setCurrentStep(prev => prev + 1)
+       }
     }
 
     executeNext()
@@ -229,17 +234,17 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
   const isComplete = scanPlan && currentStep >= scanPlan.recommendations.length
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0a0f]">
+    <div className="flex flex-col h-full bg-hex-bg">
       {/* Header */}
-      <div className="border-b border-[#1a1a2e] bg-[#0f0f1a] px-6 py-4">
+      <div className="border-b border-hex-border bg-hex-surface px-6 py-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-[#e63946]/10 rounded-lg">
-              <Brain className="text-[#e63946]" size={20} />
+            <div className="p-2 bg-hex-accent/10 rounded-lg">
+              <Brain className="text-hex-accent" size={20} />
             </div>
             <div>
-              <h2 className="text-xl font-bold text-[#e2e8f0]">Autonomous Intelligence</h2>
-              <p className="text-xs text-[#6b7280]">AI-driven reconnaissance and analysis</p>
+              <h2 className="text-xl font-bold text-hex-text">Autonomous Intelligence</h2>
+              <p className="text-xs text-hex-muted">AI-driven reconnaissance and analysis</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -247,7 +252,7 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
               <>
                 <button
                   onClick={() => setShowNarrative(!showNarrative)}
-                  className="flex items-center gap-2 px-3 py-2 bg-[#1a1a2e] hover:bg-[#1a1a2e]/80 border border-[#1a1a2e] rounded-lg text-xs text-[#94a3b8] transition-colors"
+                  className="flex items-center gap-2 px-3 py-2 bg-hex-border hover:bg-hex-border/80 border border-hex-border rounded-lg text-xs text-hex-text-dim transition-colors"
                 >
                   <FileText size={14} />
                   {showNarrative ? 'Show Report' : 'Show Narrative'}
@@ -279,16 +284,16 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
         <div className="max-w-5xl mx-auto space-y-6">
           {/* Loading / connection states */}
           {hexstrikeLoading && tools.length === 0 && (
-            <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-5">
+            <div className="card-panel p-5">
               <div className="flex items-center gap-3">
-                <Loader2 size={16} className="text-[#00d4ff] animate-spin" />
-                <span className="text-sm text-[#94a3b8]">Loading tool catalog…</span>
+                <Loader2 size={16} className="text-hex-cyan animate-spin" />
+                <span className="text-sm text-hex-text-dim">Loading tool catalog…</span>
               </div>
             </div>
           )}
           {!hexstrikeLoading && !hexstrikeConnected && tools.length === 0 && (
-            <div className="bg-[#0f0f1a] border border-[#e63946]/30 rounded-xl p-5">
-              <div className="flex items-center gap-2 text-[#e63946] text-sm font-medium mb-1">
+            <div className="card-panel border-hex-accent/30 p-5">
+              <div className="flex items-center gap-2 text-hex-accent text-sm font-medium mb-1">
                 <AlertTriangle size={14} />
                 HexStrike backend not reachable
               </div>
@@ -310,10 +315,10 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
           )}
 
           {/* Target Input */}
-          <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-5">
+          <div className="card-panel p-5">
             <div className="flex items-center gap-2 mb-4">
-              <Target size={16} className="text-[#e63946]" />
-              <h3 className="text-sm font-semibold text-[#e2e8f0]">Target Selection</h3>
+              <Target size={16} className="text-hex-accent" />
+              <h3 className="text-sm font-semibold text-hex-text">Target Selection</h3>
             </div>
             <div className="flex gap-3">
               <input
@@ -321,7 +326,7 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
                 value={target}
                 onChange={(e) => setTarget(e.target.value)}
                 placeholder="Enter domain, IP, URL, email, or username..."
-                className="flex-1 bg-[#0a0a0f] border border-[#1a1a2e] rounded-lg px-4 py-3 text-sm text-[#e2e8f0] placeholder-[#6b7280] focus:border-[#e63946]/60 focus:outline-none font-mono"
+                className="input-field flex-1 font-mono"
               />
               <div className="flex items-center gap-2">
                 {!isRunning ? (
@@ -376,22 +381,22 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
 
           {/* Progress Bar */}
           {isRunning && scanPlan && (
-            <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl p-5">
+            <div className="card-panel p-5">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
-                  <Zap size={16} className="text-[#00ff41] animate-pulse" />
-                  <span className="text-sm font-medium text-[#e2e8f0]">
+                  <Zap size={16} className="text-hex-green animate-pulse" />
+                  <span className="text-sm font-medium text-hex-text">
                     {isComplete ? 'Scan Complete' : 'Autonomous Scan in Progress'}
                   </span>
                 </div>
-                <div className="flex items-center gap-2 text-xs text-[#6b7280]">
+                <div className="flex items-center gap-2 text-xs text-hex-muted">
                   <Clock size={12} />
                   <span>{currentStep}/{scanPlan.recommendations.length} steps</span>
                 </div>
               </div>
-              <div className="w-full bg-[#0a0a0f] rounded-full h-2 overflow-hidden">
+              <div className="w-full bg-hex-bg rounded-full h-2 overflow-hidden">
                 <div
-                  className="h-full bg-gradient-to-r from-[#e63946] to-[#00ff41] transition-all duration-300"
+                  className="h-full bg-gradient-to-r from-hex-accent to-hex-green transition-all duration-300"
                   style={{ width: `${progress}%` }}
                 />
               </div>
@@ -400,15 +405,15 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
 
           {/* AI Scan Plan */}
           {scanPlan && (
-            <div className="bg-[#0f0f1a] border border-[#1a1a2e] rounded-xl overflow-hidden">
+            <div className="card-panel overflow-hidden">
               <button
                 onClick={() => setShowPlan(!showPlan)}
-                className="w-full px-5 py-4 flex items-center justify-between hover:bg-[#1a1a2e]/50 transition-colors"
+                className="w-full px-5 py-4 flex items-center justify-between hover:bg-hex-border/50 transition-colors"
               >
                 <div className="flex items-center gap-2">
-                  <Brain size={16} className="text-[#e63946]" />
-                  <h3 className="text-sm font-semibold text-[#e2e8f0]">AI-Generated Scan Plan</h3>
-                  <span className="px-2 py-0.5 bg-[#e63946]/10 border border-[#e63946]/30 rounded text-xs text-[#e63946]">
+                  <Brain size={16} className="text-hex-accent" />
+                  <h3 className="text-sm font-semibold text-hex-text">AI-Generated Scan Plan</h3>
+                  <span className="px-2 py-0.5 bg-hex-accent/10 border border-hex-accent/30 rounded text-xs text-hex-accent">
                     {scanPlan.recommendations.length} tools
                   </span>
                 </div>
@@ -425,7 +430,6 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
                     {scanPlan.recommendations.map((rec, idx) => {
                       const isExecuted = idx < currentStep
                       const isCurrent = idx === currentStep && isRunning && !isPaused
-                      void (idx > currentStep) // isPending
 
                       return (
                         <div
@@ -516,9 +520,9 @@ export function AutonomousWorkspace({ workspaceType, tools }: AutonomousWorkspac
                 <h3 className="text-sm font-semibold text-[#e2e8f0]">AI Analysis</h3>
               </div>
 
-              {analysis.findings.length > 0 ? (
-                <div className="space-y-3">
-                  {analysis.findings.map((finding: any, idx: number) => (
+               {analysis.findings.length > 0 ? (
+                 <div className="space-y-3">
+                   {analysis.findings.map((finding, idx) => (
                     <div
                       key={idx}
                       className={`p-4 rounded-lg border ${
